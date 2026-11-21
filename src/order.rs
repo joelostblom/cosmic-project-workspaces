@@ -1,3 +1,4 @@
+use crate::layout::Side;
 use std::collections::HashSet;
 
 pub struct OrderPlan {
@@ -34,11 +35,33 @@ impl OrderPlan {
         }
         Self { expected, moves }
     }
+
+    pub fn outgoing_workspace(
+        &self,
+        active: u64,
+        movement: Side,
+        eligible: impl Fn(u64) -> bool,
+    ) -> Option<u64> {
+        let index = self.expected.iter().position(|&id| id == active)?;
+        // COSMIC compares old and new indices at activation. For a move to
+        // the right, animate from an earlier index in the final order.
+        match movement {
+            Side::Left => self.expected[index + 1..]
+                .iter()
+                .copied()
+                .find(|&id| eligible(id)),
+            Side::Right => self.expected[..index]
+                .iter()
+                .rev()
+                .copied()
+                .find(|&id| eligible(id)),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::OrderPlan;
+    use super::{OrderPlan, Side};
 
     #[test]
     fn gathers_project_rows_without_directly_moving_unassigned_workspaces() {
@@ -57,5 +80,18 @@ mod tests {
         let plan = OrderPlan::new(&[1, 2, 3, 4], &[6, 2]);
         assert_eq!(plan.expected, [1, 2, 3, 4]);
         assert!(plan.moves.is_empty());
+    }
+
+    #[test]
+    fn animation_reference_is_on_the_correct_side_of_the_final_order() {
+        let plan = OrderPlan::new(&[1, 2, 3, 4, 5], &[3, 1, 4, 2]);
+        assert_eq!(plan.expected, [3, 1, 4, 2, 5]);
+        assert_eq!(plan.outgoing_workspace(1, Side::Right, |_| true), Some(3));
+        assert_eq!(
+            plan.outgoing_workspace(1, Side::Left, |id| id != 4),
+            Some(2)
+        );
+        assert_eq!(plan.outgoing_workspace(1, Side::Right, |id| id != 3), None);
+        assert_eq!(plan.outgoing_workspace(3, Side::Right, |_| true), None);
     }
 }

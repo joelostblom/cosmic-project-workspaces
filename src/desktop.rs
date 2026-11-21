@@ -47,6 +47,13 @@ pub struct Desktop {
     slide: Option<SlideExperiment>,
 }
 
+struct MoveSlide<'a> {
+    active: &'a ObjectId,
+    side: Side,
+    source: &'a str,
+    destination: &'a str,
+}
+
 impl Desktop {
     pub fn connect(
         layout: Layout,
@@ -157,7 +164,7 @@ impl Desktop {
                 let workspace = self.state.current()?;
                 let (key, id, label) = (workspace.key(), workspace.handle.id(), workspace.label());
                 self.state.layout.assign(key, project.clone(), top)?;
-                Ok(self.finish_assignment(&id, label, &project, "Assigned"))
+                Ok(self.finish_assignment(&id, label, &project, None))
             }
             Command::MoveLeft | Command::MoveRight => {
                 let side = if matches!(command, Command::MoveLeft) {
@@ -167,11 +174,17 @@ impl Desktop {
                 };
                 let workspace = self.state.current()?;
                 let (key, id, label) = (workspace.key(), workspace.handle.id(), workspace.label());
+                let source = self
+                    .state
+                    .layout
+                    .project_name(&key)
+                    .context("active workspace is unassigned; use `cpw assign PROJECT` first")?
+                    .to_owned();
                 let project =
                     self.state
                         .layout
                         .move_to_neighbor(key, side, &self.state.default_project)?;
-                Ok(self.finish_assignment(&id, label, &project, "Moved"))
+                Ok(self.finish_assignment(&id, label, &project, Some((side, &source))))
             }
             Command::RenameProject { name } => {
                 let key = self.state.current()?.key();
@@ -269,14 +282,20 @@ impl Desktop {
         id: &ObjectId,
         label: String,
         project: &str,
-        verb: &str,
+        movement: Option<(Side, &str)>,
     ) -> String {
         if let Some(workspace) = self.state.workspaces.get_mut(id) {
             workspace.extension = None;
         }
         self.state.observe_active();
+        let animation = movement.map(|(side, source)| MoveSlide {
+            active: id,
+            side,
+            source,
+            destination: project,
+        });
         let warning = self
-            .sync_order(false)
+            .sync_order_with_slide(false, animation)
             .err()
             .map(|error| format!("\nCould not sync COSMIC order: {error:#}"))
             .unwrap_or_default();
@@ -286,6 +305,11 @@ impl Desktop {
             "\nSession only unless you pin this workspace in COSMIC."
         } else {
             ""
+        };
+        let verb = if movement.is_some() {
+            "Moved"
+        } else {
+            "Assigned"
         };
         format!("{verb} {label} to {project}.{hint}{warning}")
     }
@@ -377,6 +401,14 @@ impl Desktop {
     }
 
     fn sync_order(&mut self, dry_run: bool) -> Result<String> {
+        self.sync_order_with_slide(dry_run, None)
+    }
+
+    fn sync_order_with_slide(
+        &mut self,
+        dry_run: bool,
+        animation: Option<MoveSlide<'_>>,
+    ) -> Result<String> {
         // New handles may have been created during the previous roundtrip.
         if !dry_run
             && self.state.cosmic_manager.is_some()
@@ -385,7 +417,7 @@ impl Desktop {
             self.queue.roundtrip(&mut self.state)?;
             self.state.ensure_online()?;
         }
-        self.state.current()?;
+        let active = self.state.current()?;
         let current = self.state.ordered_workspaces()?;
         let ids: Vec<_> = current.iter().map(|w| w.serial).collect();
         let managed: Vec<_> = self
@@ -400,11 +432,11 @@ impl Desktop {
             })
             .collect();
         let plan = OrderPlan::new(&ids, &managed);
-        if plan.moves.is_empty() {
-            return Ok("COSMIC workspace order already matches.".into());
-        }
         let by_id: HashMap<_, _> = current.iter().map(|w| (w.serial, *w)).collect();
         if dry_run {
+            if plan.moves.is_empty() {
+                return Ok("COSMIC workspace order already matches.".into());
+            }
             let describe = |order: &[u64]| {
                 order
                     .iter()
@@ -425,10 +457,22 @@ impl Desktop {
                 describe(&plan.expected)
             ));
         }
-        ensure!(
-            self.state.cosmic_manager.is_some(),
-            "this session doesn't expose COSMIC workspace reordering"
-        );
+        let outgoing = self.slide.as_ref().and_then(|_| {
+            let movement = animation.as_ref()?;
+            if &active.handle.id() != movement.active || !active.can_activate {
+                return None;
+            }
+            self.state.slide_reference(&plan, &by_id, active, movement)
+        });
+        if plan.moves.is_empty() && outgoing.is_none() {
+            return Ok("COSMIC workspace order already matches.".into());
+        }
+        if !plan.moves.is_empty() {
+            ensure!(
+                self.state.cosmic_manager.is_some(),
+                "this session doesn't expose COSMIC workspace reordering"
+            );
+        }
         // Check the entire batch before sending any requests. The target
         // anchor doesn't need to be movable, only the workspace being moved.
         let requests = plan
@@ -450,15 +494,57 @@ impl Desktop {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
+        let manager = self
+            .state
+            .manager
+            .as_ref()
+            .context("workspace manager went away")?;
+        let (outgoing, override_layout) = match (&self.slide, outgoing) {
+            (Some(slide), Some(outgoing)) => match slide.apply(SlideAxis::Horizontal) {
+                Ok(guard) => (Some(outgoing), guard),
+                Err(error) => {
+                    eprintln!("Skipping the move animation: {error:#}");
+                    (None, None)
+                }
+            },
+            _ => (None, None),
+        };
+        if override_layout.is_some() {
+            thread::sleep(CONFIG_SETTLE);
+        }
+        if requests.is_empty() && outgoing.is_none() {
+            return Ok("COSMIC workspace order already matches.".into());
+        }
         for (source, anchor) in requests {
             source.move_before(anchor, 0);
         }
-        self.state
-            .manager
-            .as_ref()
-            .context("workspace manager went away")?
-            .commit();
-        self.queue.roundtrip(&mut self.state)?;
+        let animated_active = outgoing.map(|outgoing| {
+            // Reordering the active handle alone never starts an animation.
+            // In one commit, use a neighboring workspace as the outgoing
+            // view, then switch back to the moved workspace in its new slot.
+            outgoing.handle.activate();
+            active.handle.activate();
+            active.handle.id()
+        });
+        manager.commit();
+        self.state.defer_active_observation = animated_active.is_some();
+        let result = self.queue.roundtrip(&mut self.state);
+        self.state.defer_active_observation = false;
+        result?;
+        if let Some(id) = animated_active {
+            // The transient activation mustn't change project history or
+            // emit a project-switch notification.
+            self.state.observe_active();
+            thread::sleep(ANIMATION_HOLD);
+            drop(override_layout);
+            ensure!(
+                self.state
+                    .workspaces
+                    .get(&id)
+                    .is_some_and(Workspace::active),
+                "COSMIC didn't confirm that the moved workspace stayed active"
+            );
+        }
         self.state.ensure_online()?;
         ensure!(
             self.state
@@ -560,6 +646,7 @@ struct State {
     default_project: String,
     default_order_changed: bool,
     project_changes: ProjectChanges,
+    defer_active_observation: bool,
     occupancy: Occupancy,
 }
 
@@ -574,6 +661,7 @@ struct Workspace {
     state: workspace::State,
     can_activate: bool,
     can_move: Option<bool>,
+    pinned: bool,
     extension: Option<Extension>,
 }
 
@@ -652,6 +740,46 @@ impl State {
 
     fn dynamic_empty(&self, workspace: &Workspace) -> bool {
         workspace.id.is_none() && !self.occupancy.has_window(&workspace.handle.id())
+    }
+
+    fn slide_reference<'a>(
+        &self,
+        plan: &OrderPlan,
+        workspaces_by_serial: &HashMap<u64, &'a Workspace>,
+        active: &Workspace,
+        movement: &MoveSlide<'_>,
+    ) -> Option<&'a Workspace> {
+        let occupied_or_pinned =
+            |w: &Workspace| w.pinned || self.occupancy.has_window(&w.handle.id());
+        let usable = |id| {
+            let w = workspaces_by_serial[&id];
+            // COSMIC clears workspace urgency on activation.
+            w.can_activate && !w.state.contains(workspace::State::Urgent)
+        };
+        let reference = plan
+            .outgoing_workspace(active.serial, movement.side, |id| {
+                let w = workspaces_by_serial[&id];
+                let project = self.layout.project_name(&w.key());
+                usable(id)
+                    && occupied_or_pinned(w)
+                    && (project == Some(movement.source) || project == Some(movement.destination))
+            })
+            .or_else(|| {
+                plan.outgoing_workspace(active.serial, movement.side, |id| {
+                    let w = workspaces_by_serial[&id];
+                    usable(id)
+                        && plan.expected.last() == Some(&id)
+                        && self.dynamic_empty(w)
+                        && !self.layout.contains(&w.key())
+                        && occupied_or_pinned(active)
+                })
+            })
+            .or_else(|| {
+                plan.outgoing_workspace(active.serial, movement.side, |id| {
+                    usable(id) && occupied_or_pinned(workspaces_by_serial[&id])
+                })
+            })?;
+        workspaces_by_serial.get(&reference).copied()
     }
 
     fn default_candidates(&self) -> Vec<Key> {
@@ -748,6 +876,9 @@ impl State {
     }
 
     fn observe_active(&mut self) {
+        if self.defer_active_observation {
+            return;
+        }
         let current = self.current().ok().map(|w| (w.serial, w.key()));
         let active = current.map(|(serial, key)| (serial, self.layout.observe_active(key)));
         self.project_changes.observe(active);
@@ -926,6 +1057,7 @@ impl Dispatch<ExtWorkspaceManagerV1, ()> for State {
                         state: workspace::State::empty(),
                         can_activate: false,
                         can_move: None,
+                        pinned: false,
                         extension: None,
                     },
                 );
@@ -1046,13 +1178,23 @@ impl Dispatch<ZcosmicWorkspaceHandleV2, ObjectId> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let cosmic_workspace::Event::Capabilities { capabilities } = event
-            && let Some(workspace) = state.workspaces.get_mut(id)
-        {
-            workspace.can_move = Some(
-                cosmic_workspace::WorkspaceCapabilities::from_bits_truncate(capabilities.into())
+        let Some(workspace) = state.workspaces.get_mut(id) else {
+            return;
+        };
+        match event {
+            cosmic_workspace::Event::Capabilities { capabilities } => {
+                workspace.can_move = Some(
+                    cosmic_workspace::WorkspaceCapabilities::from_bits_truncate(
+                        capabilities.into(),
+                    )
                     .contains(cosmic_workspace::WorkspaceCapabilities::Move),
-            );
+                );
+            }
+            cosmic_workspace::Event::State { state } => {
+                workspace.pinned = cosmic_workspace::State::from_bits_truncate(state.into())
+                    .contains(cosmic_workspace::State::Pinned);
+            }
+            _ => {}
         }
     }
 }

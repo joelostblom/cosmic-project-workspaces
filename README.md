@@ -55,6 +55,8 @@ COSMIC chooses the slide axis for all switches from its workspace layout setting
 
 Stop the old helper and start it with `./target/release/cpw serve --experimental-slide`. Existing shortcuts still work. The helper temporarily changes COSMIC's **global** workspace layout to horizontal for `left`, `right`, and `go`, or to vertical for `up` and `down`, then restores the original setting. It only writes when the requested axis differs, and requires an existing user layout setting written by COSMIC Settings.
 
+This flag also enables experimental horizontal slides for `move-left` and `move-right`. COSMIC doesn't animate a reorder by itself, so `cpw` uses an existing workspace as the outgoing view and returns to the moved workspace in the same Wayland transaction. You may see that neighboring workspace briefly during the slide, but the moved workspace is still active afterward. If there's no suitable workspace on the needed side, the move still works without a slide.
+
 There is no compositor acknowledgement: the helper gives the setting 60 ms to take effect and waits 230 ms after switching before processing another move. COSMIC still chooses the slide's direction from its flat workspace order; use `cpw sync-order` if a project comes in from the wrong side. Other COSMIC controls can see the temporary layout. Avoid changing workspace settings during a switch.
 
 Ctrl+C lets the helper finish restoring the setting. If it is forcibly killed mid-switch, use COSMIC Settings → Desktop → Workspaces to reselect your preferred layout. Stop and start plain `cpw serve` to go back to the normal behavior.
