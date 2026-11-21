@@ -36,6 +36,18 @@ pub struct Project {
     pub last: Option<Key>,
 }
 
+pub struct ProjectPosition {
+    pub name: String,
+    pub row: usize,
+    pub total: usize,
+}
+
+impl ProjectPosition {
+    pub fn title(&self) -> String {
+        format!("{} ({}/{})", self.name, self.row, self.total)
+    }
+}
+
 impl Project {
     pub fn entry(&self, available: impl Fn(&Key) -> bool) -> Option<&Key> {
         self.last
@@ -128,6 +140,11 @@ impl Layout {
         self.position(key).is_some()
     }
 
+    pub fn project_name(&self, key: &Key) -> Option<&str> {
+        self.position(key)
+            .map(|(column, _)| self.projects[column].name.as_str())
+    }
+
     pub fn assign(&mut self, key: Key, name: String, top: bool) -> Result<()> {
         validate_name(&name)?;
         self.detach(&key);
@@ -198,11 +215,15 @@ impl Layout {
         }
     }
 
-    pub fn observe_active(&mut self, key: Key) -> Option<&str> {
-        let (column, _) = self.position(&key)?;
+    pub fn observe_active(&mut self, key: Key) -> Option<ProjectPosition> {
+        let (column, row) = self.position(&key)?;
         let project = &mut self.projects[column];
         project.last = Some(key);
-        Some(&project.name)
+        Some(ProjectPosition {
+            name: project.name.clone(),
+            row: row + 1,
+            total: project.members.len(),
+        })
     }
 
     pub fn go(&self, name: &str, available: impl Fn(&Key) -> bool) -> Result<&Key> {

@@ -1,6 +1,8 @@
 mod desktop;
 mod layout;
 mod notifications;
+mod order;
+mod slide;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
@@ -8,6 +10,7 @@ use desktop::Desktop;
 use layout::{Layout, SavedLayout};
 use notifications::Notifier;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use slide::SlideExperiment;
 use std::{
     env,
     fs::{self, File, OpenOptions},
@@ -17,6 +20,10 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -41,9 +48,22 @@ enum Command {
         /// Don't show project-name banners when switching projects
         #[arg(long)]
         no_notifications: bool,
+        /// Temporarily toggle COSMIC's global slide axis for each cpw move
+        #[arg(long)]
+        experimental_slide: bool,
     },
     /// List project columns, their rows, and the active workspace
-    Status,
+    Status {
+        /// Show labeled project columns side by side
+        #[arg(long)]
+        grid: bool,
+    },
+    /// Match COSMIC's workspace order to the project columns
+    SyncOrder {
+        /// Show the proposed order without changing COSMIC
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Assign the active workspace, creating the project if necessary
     Assign {
         project: String,
@@ -72,7 +92,10 @@ fn main() -> Result<()> {
     let runtime = env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
     let runtime = Path::new(&runtime);
     match command {
-        Command::Serve { no_notifications } => serve(runtime, no_notifications),
+        Command::Serve {
+            no_notifications,
+            experimental_slide,
+        } => serve(runtime, no_notifications, experimental_slide),
         other => {
             let stream = UnixStream::connect(socket_path(runtime))
                 .context("could not contact the helper; start it with `cpw serve`")?;
@@ -86,10 +109,23 @@ fn main() -> Result<()> {
     }
 }
 
-fn serve(runtime: &Path, no_notifications: bool) -> Result<()> {
+fn serve(runtime: &Path, no_notifications: bool, experimental_slide: bool) -> Result<()> {
     let socket = CommandSocket::bind(runtime)?;
     let (mut file, layout) = StateFile::load()?;
-    let mut desktop = Desktop::connect(layout)?;
+    let stopping = Arc::new(AtomicBool::new(false));
+    let slide = if experimental_slide {
+        let slide = SlideExperiment::new(&config_home()?)?;
+        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            signal_hook::flag::register(signal, Arc::clone(&stopping))?;
+        }
+        eprintln!(
+            "Experimental slide enabled: cpw will temporarily change COSMIC's workspace layout."
+        );
+        Some(slide)
+    } else {
+        None
+    };
+    let mut desktop = Desktop::connect(layout, slide)?;
     file.save(desktop.snapshot())?;
     let notifier = if no_notifications {
         None
@@ -99,9 +135,12 @@ fn serve(runtime: &Path, no_notifications: bool) -> Result<()> {
             .ok()
     };
     println!("Project workspace helper is ready. Ctrl+C to stop.");
-    loop {
+    while !stopping.load(Ordering::Relaxed) {
         let accept_command = desktop.wait(&socket.listener)?;
         file.save(desktop.snapshot())?;
+        if stopping.load(Ordering::Relaxed) {
+            break;
+        }
         if accept_command {
             let (stream, _) = socket.listener.accept().context("accept a command")?;
             if let Err(error) = serve_client(stream, &mut desktop, &mut file) {
@@ -112,6 +151,7 @@ fn serve(runtime: &Path, no_notifications: bool) -> Result<()> {
             notifier.show(project);
         }
     }
+    Ok(())
 }
 
 fn serve_client(stream: UnixStream, desktop: &mut Desktop, file: &mut StateFile) -> Result<()> {
@@ -146,6 +186,14 @@ fn receive<T: DeserializeOwned>(stream: &UnixStream) -> Result<T> {
 
 fn socket_path(runtime: &Path) -> PathBuf {
     runtime.join(format!("{APP}.sock"))
+}
+
+fn config_home() -> Result<PathBuf> {
+    env::var_os("XDG_CONFIG_HOME")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .context("neither XDG_CONFIG_HOME nor HOME is set")
 }
 
 struct CommandSocket {
@@ -199,12 +247,7 @@ struct StateFile {
 
 impl StateFile {
     fn load() -> Result<(Self, Layout)> {
-        let base = env::var_os("XDG_CONFIG_HOME")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .context("neither XDG_CONFIG_HOME nor HOME is set")?;
-        let path = base.join(APP).join("layout.json");
+        let path = config_home()?.join(APP).join("layout.json");
         let result = fs::read(&path);
         let layout = match result {
             Ok(bytes) => serde_json::from_slice(&bytes)

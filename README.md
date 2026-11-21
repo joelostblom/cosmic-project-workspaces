@@ -33,11 +33,25 @@ Repeat on another workspace with a different project name. Assign a third worksp
 
 New projects appear on the right; new rows go at the bottom unless you pass `--top`. `cpw go PROJECT` enters a project by name, including when the active workspace isn't assigned. Unavailable workspaces are skipped; if a project's last-used workspace is unavailable, entry falls back to its top available row. `cpw unassign` removes just the active workspace from the layout. `cpw forget PROJECT` removes a whole column. Neither command closes or unpins any workspaces.
 
+### Keep COSMIC order in sync
+
+Each `assign` also quietly groups assigned workspaces in COSMIC's own list, in project order and then top to bottom. The block starts at the first assigned workspace. Unassigned workspaces keep their relative order and the unassigned spare stays at the end. COSMIC's workspace numbers and its native next/previous traversal can change; the active workspace and its windows stay together.
+
+`cpw status --grid` shows the project columns side by side, with the active workspace in brackets. `cpw sync-order --dry-run` previews a reorder without making changes. Run `cpw sync-order` to apply it to an existing layout or repair drift after manually dragging workspaces in COSMIC or starting a new login session. Switching projects never reorders workspaces.
+
 ## Banners and animation
 
-When you enter a different project, `cpw` shows its name in a short COSMIC notification, even if you switch with COSMIC's own controls. Moving within a project doesn't show a banner. The notification uses `notify-send` (from `libnotify` on Fedora), stays out of COSMIC's notification history, and respects Do Not Disturb. To disable it, start the helper with `cpw serve --no-notifications`.
+When you enter a different project, `cpw` shows its name and row (for example, `Personal (2/3)`) in a short COSMIC notification, even if you switch with COSMIC's own controls. Moving within a project doesn't show a banner. The notification uses `notify-send` (from `libnotify` on Fedora), stays out of COSMIC's notification history, and respects Do Not Disturb. To disable it, start the helper with `cpw serve --no-notifications`.
 
-COSMIC chooses the slide axis for all switches from its workspace layout setting. `cpw` can't set an axis or direction per switch, so the native slide animation is unchanged.
+COSMIC chooses the slide axis for all switches from its workspace layout setting. By default `cpw` leaves that setting alone.
+
+### Experimental slide-axis workaround
+
+Stop the old helper and start it with `./target/release/cpw serve --experimental-slide`. Existing shortcuts still work. The helper temporarily changes COSMIC's **global** workspace layout to horizontal for `left`, `right`, and `go`, or to vertical for `up` and `down`, then restores the original setting. It only writes when the requested axis differs, and requires an existing user layout setting written by COSMIC Settings.
+
+There is no compositor acknowledgement: the helper gives the setting 60 ms to take effect and waits 230 ms after switching before processing another move. COSMIC still chooses the slide's direction from its flat workspace order; use `cpw sync-order` if a project comes in from the wrong side. Other COSMIC controls can see the temporary layout. Avoid changing workspace settings during a switch.
+
+Ctrl+C lets the helper finish restoring the setting. If it is forcibly killed mid-switch, use COSMIC Settings → Desktop → Workspaces to reselect your preferred layout. Stop and start plain `cpw serve` to go back to the normal behavior.
 
 ## Shortcuts and pinning
 
