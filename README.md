@@ -16,18 +16,26 @@ In one terminal, leave the helper running:
 
 Workspaces without a project are automatically assigned to **Work**, including new workspaces you start using through COSMIC itself. The empty trailing workspace is kept free for any project to borrow. To use a different default, start the helper with `./target/release/cpw serve --default-project "My project"`. This doesn't move any workspaces that already have an assignment.
 
-On the workspace you want to move out of the default project, open a terminal in the project directory and assign it:
+On a fresh layout, **Work** and **Personal** are ready to use. With a different default, that project comes first, followed by Personal (or Work if Personal is the default). To choose the initial columns and their order, repeat `--project NAME` on the first run. Include the default project in that list:
+
+```sh
+./target/release/cpw serve --project Work --project "Side Projects" --project Personal
+```
+
+Saved layouts keep their existing columns; `--project` is only used to set up a new one.
+
+### Move workspaces between projects
+
+`cpw move-left` and `cpw move-right` move the **whole active workspace**, with its windows, to the bottom of the adjacent project. It stays active. These commands can move into an empty column; plain `left` and `right` skip empty columns and never create projects. Moving past an outer edge creates a temporary `Project N` on that side. Temporary columns disappear when they lose their last workspace. Use `cpw rename-project NAME` while on a workspace in that column to give it a permanent name. The configured default name is fixed for the current run; change it with `--default-project`.
+
+Named columns stay visible even if they have no workspaces. No extra COSMIC workspaces are created to keep them alive. You can still assign the active workspace by name to create a named column or reach a project that isn't adjacent:
 
 ```sh
 ./target/release/cpw assign Personal
-# On a different workspace:
-./target/release/cpw assign Personal --top
-./target/release/cpw status
-./target/release/cpw left
-./target/release/cpw right
+./target/release/cpw status --grid
 ```
 
-New projects appear on the right; new rows go at the bottom unless you pass `--top`. `cpw go PROJECT` enters a project by name, including from the empty spare. Unavailable workspaces are skipped; if a project's last-used workspace is unavailable, entry falls back to its top available row. `cpw unassign` returns the active workspace to the default project (or frees it if it's the empty trailing workspace). `cpw forget PROJECT` removes a non-default column and returns its available workspaces to the default. Neither command closes or unpins any workspaces.
+With `assign`, new projects appear on the right; new rows go at the bottom unless you pass `--top`. `cpw go PROJECT` enters a project by name, including from the empty spare. Unavailable workspaces are skipped; if a project's last-used workspace is unavailable, entry falls back to its top available row. `cpw unassign` returns the active workspace to the default project (or frees it if it's the empty trailing workspace). `cpw forget PROJECT` removes a non-default column and returns its available workspaces to the default. Neither command closes or unpins any workspaces.
 
 Press **Down** on a project's bottom row or **Up** on its top row to borrow COSMIC's trailing empty workspace without pinning it. For **Up**, `cpw` moves the spare above the current row and activates it in one transaction so COSMIC can slide upward. For **Down**, the spare stays at the end for the slide; `cpw` syncs it into the project block when COSMIC supplies a fresh spare. Open a window on the new row before growing that edge again. If you leave the row empty, COSMIC can remove it or the helper can return it to the spare pool.
 
@@ -53,7 +61,7 @@ Ctrl+C lets the helper finish restoring the setting. If it is forcibly killed mi
 
 ## Shortcuts and pinning
 
-- **Optional shortcuts:** Add four custom commands under COSMIC Settings → Keyboard → Keyboard Shortcuts. Use the **absolute path** to the built binary, followed by `left`, `right`, `up`, or `down`. Choose unused shortcuts at first so COSMIC's existing navigation remains available. The helper must be running for these commands to work.
+- **Optional shortcuts:** Add custom commands under COSMIC Settings → Keyboard → Keyboard Shortcuts. Use the **absolute path** to the built binary, followed by `left`, `right`, `up`, `down`, `move-left`, or `move-right`. Choose unused shortcuts at first so COSMIC's existing navigation remains available. The helper must be running for these commands to work.
 - **Keep workspaces:** Pin a workspace in COSMIC's Workspaces overview before or after assigning it. This keeps it from disappearing when empty and lets COSMIC give the helper a stable ID. The helper saves those assignments and their last-used state in `$XDG_CONFIG_HOME/cosmic-project-workspaces/layout.json` (normally under `~/.config`). Unpinned dynamic workspaces are normally session-only: if COSMIC removes one, the helper drops its assignment. The helper does not pin or unpin anything itself.
 
 This prototype requires a single active display. It borrows COSMIC's dynamic spare rather than creating workspaces directly. It does not move windows, change touchpad gestures, or replace COSMIC's overview. To stop, press Ctrl+C in the terminal running `serve`.

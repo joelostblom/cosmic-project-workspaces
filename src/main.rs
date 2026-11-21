@@ -54,6 +54,9 @@ enum Command {
         /// Project for workspaces that haven't been assigned
         #[arg(long, default_value = "Work", value_name = "NAME")]
         default_project: String,
+        /// Initial project names in column order (repeatable; only for a new layout)
+        #[arg(long = "project", value_name = "NAME")]
+        projects: Vec<String>,
     },
     /// List project columns, their rows, and the active workspace
     Status {
@@ -74,6 +77,8 @@ enum Command {
         #[arg(long)]
         top: bool,
     },
+    /// Rename the active workspace's project and keep the column even if empty
+    RenameProject { name: String },
     /// Return the active workspace to the default project
     Unassign,
     /// Remove a project and return its workspaces to the default project
@@ -84,6 +89,10 @@ enum Command {
     Left,
     /// Switch right to the neighboring project's last-used workspace
     Right,
+    /// Move the entire active workspace to the column on the left
+    MoveLeft,
+    /// Move the entire active workspace to the column on the right
+    MoveRight,
     /// Move up within the active project, borrowing an empty row at the top
     Up,
     /// Move down within the active project, borrowing an empty row at the bottom
@@ -99,11 +108,13 @@ fn main() -> Result<()> {
             no_notifications,
             experimental_slide,
             default_project,
+            projects,
         } => serve(
             runtime,
             no_notifications,
             experimental_slide,
             default_project,
+            projects,
         ),
         other => {
             let stream = UnixStream::connect(socket_path(runtime))
@@ -123,10 +134,16 @@ fn serve(
     no_notifications: bool,
     experimental_slide: bool,
     default_project: String,
+    projects: Vec<String>,
 ) -> Result<()> {
     layout::validate_name(&default_project).context("invalid --default-project")?;
     let socket = CommandSocket::bind(runtime)?;
-    let (mut file, layout) = StateFile::load()?;
+    let (mut file, loaded) = StateFile::load()?;
+    let mut layout = match loaded {
+        Some(layout) => layout,
+        None => Layout::initial(&default_project, projects)?,
+    };
+    layout.keep_named(&default_project);
     let stopping = Arc::new(AtomicBool::new(false));
     let slide = if experimental_slide {
         let slide = SlideExperiment::new(&config_home()?)?;
@@ -261,18 +278,19 @@ struct StateFile {
 }
 
 impl StateFile {
-    fn load() -> Result<(Self, Layout)> {
+    fn load() -> Result<(Self, Option<Layout>)> {
         let path = config_home()?.join(APP).join("layout.json");
         let result = fs::read(&path);
         let layout = match result {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .context("invalid project layout")
-                .and_then(Layout::restore),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Layout::default()),
+                .and_then(Layout::restore)
+                .map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
         .with_context(|| format!("load {}", path.display()))?;
-        let saved = layout.snapshot();
+        let saved = layout.as_ref().map(Layout::snapshot).unwrap_or_default();
         Ok((Self { path, saved }, layout))
     }
 

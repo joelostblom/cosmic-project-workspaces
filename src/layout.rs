@@ -25,6 +25,12 @@ pub enum Direction {
     Down,
 }
 
+#[derive(Clone, Copy)]
+pub enum Side {
+    Left,
+    Right,
+}
+
 #[derive(Default)]
 pub struct Layout {
     pub projects: Vec<Project>,
@@ -34,6 +40,7 @@ pub struct Project {
     pub name: String,
     pub members: Vec<Key>,
     pub last: Option<Key>,
+    pub temporary: bool,
 }
 
 pub struct ProjectPosition {
@@ -49,6 +56,15 @@ impl ProjectPosition {
 }
 
 impl Project {
+    fn empty(name: String, temporary: bool) -> Self {
+        Self {
+            name,
+            members: Vec::new(),
+            last: None,
+            temporary,
+        }
+    }
+
     pub fn entry(&self, available: impl Fn(&Key) -> bool) -> Option<&Key> {
         self.last
             .as_ref()
@@ -67,9 +83,38 @@ struct SavedProject {
     name: String,
     members: Vec<String>,
     last: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    temporary: bool,
 }
 
 impl Layout {
+    pub fn initial(default_project: &str, names: Vec<String>) -> Result<Self> {
+        let names = if names.is_empty() {
+            let other = if default_project == "Personal" {
+                "Work"
+            } else {
+                "Personal"
+            };
+            vec![default_project.to_owned(), other.to_owned()]
+        } else {
+            ensure!(
+                names.iter().any(|name| name == default_project),
+                "initial --project names must include the default project {default_project:?}; you can change it with --default-project"
+            );
+            names
+        };
+        let mut layout = Self::default();
+        for name in names {
+            validate_name(&name)?;
+            ensure!(
+                layout.project_index(&name).is_none(),
+                "duplicate initial project {name:?}"
+            );
+            layout.projects.push(Project::empty(name, false));
+        }
+        Ok(layout)
+    }
+
     pub fn restore(saved: SavedLayout) -> Result<Self> {
         let mut names = HashSet::new();
         let mut ids = HashSet::new();
@@ -77,7 +122,7 @@ impl Layout {
             validate_name(&project.name)?;
             ensure!(names.insert(&project.name), "duplicate project name");
             ensure!(
-                !project.members.is_empty() && project.members.iter().all(|id| ids.insert(id)),
+                project.members.iter().all(|id| ids.insert(id)),
                 "each workspace must belong to exactly one project"
             );
             ensure!(
@@ -92,10 +137,12 @@ impl Layout {
             projects: saved
                 .projects
                 .into_iter()
+                .filter(|project| !project.temporary || !project.members.is_empty())
                 .map(|project| Project {
                     name: project.name,
                     members: project.members.into_iter().map(Key::Stable).collect(),
                     last: project.last.map(Key::Stable),
+                    temporary: project.temporary,
                 })
                 .collect(),
         })
@@ -112,7 +159,7 @@ impl Layout {
                         .iter()
                         .filter_map(|key| key.stable().map(str::to_owned))
                         .collect();
-                    (!members.is_empty()).then(|| SavedProject {
+                    (!project.temporary || !members.is_empty()).then(|| SavedProject {
                         name: project.name.clone(),
                         members,
                         last: project
@@ -120,6 +167,7 @@ impl Layout {
                             .as_ref()
                             .and_then(Key::stable)
                             .map(str::to_owned),
+                        temporary: project.temporary,
                     })
                 })
                 .collect(),
@@ -145,6 +193,18 @@ impl Layout {
             .map(|(column, _)| self.projects[column].name.as_str())
     }
 
+    fn project_index(&self, name: &str) -> Option<usize> {
+        self.projects
+            .iter()
+            .position(|project| project.name == name)
+    }
+
+    pub fn keep_named(&mut self, name: &str) {
+        if let Some(index) = self.project_index(name) {
+            self.projects[index].temporary = false;
+        }
+    }
+
     pub fn assign(&mut self, key: Key, name: String, top: bool) -> Result<()> {
         validate_name(&name)?;
         self.detach(&key);
@@ -162,25 +222,65 @@ impl Layout {
             return false;
         }
         // Discovering workspaces is not the same as visiting them.
-        self.get_or_create_project(name).members.extend(missing);
+        let project = self.get_or_create_project(name);
+        project.members.extend(missing);
+        project.temporary = false;
         true
     }
 
     fn get_or_create_project(&mut self, name: &str) -> &mut Project {
-        let index = self
-            .projects
-            .iter()
-            .position(|project| project.name == name);
-        if let Some(index) = index {
+        if let Some(index) = self.project_index(name) {
             &mut self.projects[index]
         } else {
-            self.projects.push(Project {
-                name: name.to_owned(),
-                members: Vec::new(),
-                last: None,
-            });
+            self.projects.push(Project::empty(name.to_owned(), false));
             self.projects.last_mut().unwrap()
         }
+    }
+
+    pub fn move_to_neighbor(
+        &mut self,
+        key: Key,
+        side: Side,
+        default_project: &str,
+    ) -> Result<String> {
+        let Some((column, _)) = self.position(&key) else {
+            bail!("active workspace is unassigned; use `cpw assign PROJECT` first");
+        };
+        let adjacent = match side {
+            Side::Left => column.checked_sub(1),
+            Side::Right => (column + 1 < self.projects.len()).then_some(column + 1),
+        };
+        let destination = if let Some(index) = adjacent {
+            self.projects[index].name.clone()
+        } else {
+            let name = (1..=self.projects.len() + 2)
+                .map(|number| format!("Project {number}"))
+                .find(|name| name != default_project && self.project_index(name).is_none())
+                .expect("a finite project list cannot use all names");
+            let index = match side {
+                Side::Left => 0,
+                Side::Right => self.projects.len(),
+            };
+            self.projects
+                .insert(index, Project::empty(name.clone(), true));
+            name
+        };
+        self.assign(key, destination.clone(), false)?;
+        Ok(destination)
+    }
+
+    pub fn rename_project(&mut self, from: &str, to: String) -> Result<()> {
+        validate_name(&to)?;
+        let Some(index) = self.project_index(from) else {
+            bail!("unknown project {from:?}");
+        };
+        ensure!(
+            from == to || self.project_index(&to).is_none(),
+            "project {to:?} already exists"
+        );
+        self.projects[index].name = to;
+        self.projects[index].temporary = false;
+        Ok(())
     }
 
     fn detach(&mut self, key: &Key) -> bool {
@@ -196,7 +296,8 @@ impl Layout {
     }
 
     fn drop_empty(&mut self) {
-        self.projects.retain(|project| !project.members.is_empty());
+        self.projects
+            .retain(|project| !project.temporary || !project.members.is_empty());
     }
 
     pub fn unassign(&mut self, key: &Key) -> bool {
@@ -220,11 +321,7 @@ impl Layout {
     }
 
     pub fn forget(&mut self, name: &str) -> Result<()> {
-        let Some(i) = self
-            .projects
-            .iter()
-            .position(|project| project.name == name)
-        else {
+        let Some(i) = self.project_index(name) else {
             bail!("unknown project {name:?}");
         };
         self.projects.remove(i);
@@ -304,6 +401,122 @@ mod tests {
 
     fn stable(id: &str) -> Key {
         Key::Stable(id.to_owned())
+    }
+
+    fn names(layout: &Layout) -> Vec<&str> {
+        layout
+            .projects
+            .iter()
+            .map(|project| project.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn new_layouts_have_named_starters_or_the_exact_custom_order() {
+        let layout = Layout::initial("Work", Vec::new()).unwrap();
+        assert_eq!(
+            names(&Layout::restore(layout.snapshot()).unwrap()),
+            ["Work", "Personal"]
+        );
+        assert_eq!(
+            names(&Layout::initial("Personal", Vec::new()).unwrap()),
+            ["Personal", "Work"]
+        );
+        let custom = Layout::initial("Work", vec!["Study".into(), "Work".into()]).unwrap();
+        assert_eq!(names(&custom), ["Study", "Work"]);
+        assert!(Layout::initial("Work", vec!["Study".into()]).is_err());
+        assert!(Layout::initial("Work", vec!["Work".into(), "Work".into()]).is_err());
+    }
+
+    #[test]
+    fn moving_uses_the_empty_neighbor_that_navigation_skips() {
+        let mut layout = Layout::initial("Work", Vec::new()).unwrap();
+        let (work, hobby) = (stable("work"), stable("hobby"));
+        layout.assign(work.clone(), "Work".into(), false).unwrap();
+        layout.assign(hobby.clone(), "Hobby".into(), false).unwrap();
+        assert_eq!(
+            layout.neighbor(&work, Direction::Right, |_| true).unwrap(),
+            Some(&hobby)
+        );
+        assert_eq!(
+            layout
+                .move_to_neighbor(work.clone(), Side::Right, "Work")
+                .unwrap(),
+            "Personal"
+        );
+        assert_eq!(layout.project_name(&work), Some("Personal"));
+        assert!(layout.projects[0].members.is_empty());
+        assert!(
+            layout
+                .move_to_neighbor(Key::Session(99), Side::Right, "Work")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn moving_past_an_edge_uses_an_unused_name_and_prunes_empty_temporary_columns() {
+        let mut layout = Layout::initial("Work", vec!["Work".into(), "Project 1".into()]).unwrap();
+        let key = stable("row");
+        layout.assign(key.clone(), "Work".into(), false).unwrap();
+        assert_eq!(
+            layout
+                .move_to_neighbor(key.clone(), Side::Left, "Project 2")
+                .unwrap(),
+            "Project 3"
+        );
+        assert_eq!(names(&layout), ["Project 3", "Work", "Project 1"]);
+        assert!(layout.projects[0].temporary);
+        let mut layout = Layout::restore(layout.snapshot()).unwrap();
+        assert!(layout.projects[0].temporary);
+        layout
+            .move_to_neighbor(key.clone(), Side::Right, "Project 2")
+            .unwrap();
+        assert_eq!(names(&layout), ["Work", "Project 1"]);
+        layout
+            .move_to_neighbor(key.clone(), Side::Right, "Project 2")
+            .unwrap();
+        layout
+            .move_to_neighbor(key.clone(), Side::Right, "Project 2")
+            .unwrap();
+        assert_eq!(names(&layout), ["Work", "Project 1", "Project 3"]);
+        assert!(layout.unassign(&key));
+        assert_eq!(names(&layout), ["Work", "Project 1"]);
+    }
+
+    #[test]
+    fn renaming_keeps_a_column_when_empty_and_does_not_move_its_rows() {
+        let mut layout = Layout::initial("Work", Vec::new()).unwrap();
+        let key = stable("row");
+        layout
+            .assign(key.clone(), "Personal".into(), false)
+            .unwrap();
+        layout
+            .move_to_neighbor(key.clone(), Side::Right, "Work")
+            .unwrap();
+        assert!(layout.rename_project("Project 1", "Work".into()).is_err());
+        layout.rename_project("Project 1", "Study".into()).unwrap();
+        assert_eq!(layout.go("Study", |_| true).unwrap(), &key);
+        layout.move_to_neighbor(key, Side::Left, "Work").unwrap();
+        let restored = Layout::restore(layout.snapshot()).unwrap();
+        assert_eq!(names(&restored), ["Work", "Personal", "Study"]);
+        assert!(restored.projects[2].members.is_empty());
+    }
+
+    #[test]
+    fn legacy_saved_projects_are_named_and_unpinned_temporary_columns_are_not_saved() {
+        let saved = serde_json::from_str(
+            r#"{"projects":[{"name":"Work","members":["stable"],"last":"stable"}]}"#,
+        )
+        .unwrap();
+        let mut layout = Layout::restore(saved).unwrap();
+        let key = Key::Session(1);
+        layout.assign(key.clone(), "Work".into(), false).unwrap();
+        layout.move_to_neighbor(key, Side::Right, "Work").unwrap();
+        assert_eq!(names(&layout), ["Work", "Project 1"]);
+        assert_eq!(
+            names(&Layout::restore(layout.snapshot()).unwrap()),
+            ["Work"]
+        );
     }
 
     #[test]
@@ -402,11 +615,11 @@ mod tests {
         let (a, b) = (stable("a"), stable("b"));
         l.assign(a.clone(), "Work".into(), false).unwrap();
         l.assign(Key::Session(4), "Work".into(), false).unwrap();
-        l.assign(Key::Session(5), "Temporary".into(), false)
-            .unwrap();
+        l.assign(Key::Session(5), "Named".into(), false).unwrap();
         let restored = Layout::restore(l.snapshot()).unwrap();
-        assert_eq!(restored.projects.len(), 1);
+        assert_eq!(names(&restored), ["Work", "Named"]);
         assert_eq!(restored.projects[0].members, std::slice::from_ref(&a));
+        assert!(restored.projects[1].members.is_empty());
         l.promote(Key::Session(4), b.clone());
         let restored = Layout::restore(l.snapshot()).unwrap();
         assert_eq!(restored.projects[0].members, [a, b.clone()]);
@@ -419,10 +632,10 @@ mod tests {
         let a = stable("a");
         l.assign(a.clone(), "Work".into(), false).unwrap();
         l.assign(a.clone(), "Personal".into(), false).unwrap();
-        assert_eq!(l.projects.len(), 1);
+        assert_eq!(names(&l), ["Work", "Personal"]);
         assert!(l.go("Work", |_| true).is_err());
         assert_eq!(l.go("Personal", |_| true).unwrap(), &a);
         assert!(l.unassign(&a));
-        assert!(l.projects.is_empty());
+        assert!(l.projects.iter().all(|p| p.members.is_empty()));
     }
 }

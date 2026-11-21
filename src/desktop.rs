@@ -2,7 +2,7 @@ mod occupancy;
 
 use crate::{
     Command,
-    layout::{Direction, Key, Layout, SavedLayout},
+    layout::{Direction, Key, Layout, SavedLayout, Side},
     notifications::ProjectChanges,
     order::OrderPlan,
     slide::{ANIMATION_HOLD, CONFIG_SETTLE, SlideAxis, SlideExperiment},
@@ -155,34 +155,43 @@ impl Desktop {
             Command::SyncOrder { dry_run } => self.sync_order(dry_run),
             Command::Assign { project, top } => {
                 let workspace = self.state.current()?;
-                let (key, serial, old_name, id) = (
-                    workspace.key(),
-                    workspace.serial,
-                    workspace.label(),
-                    workspace.handle.id(),
-                );
-                let hint = if matches!(key, Key::Session(_)) {
-                    "\nSession only unless you pin this workspace in COSMIC."
-                } else {
-                    ""
-                };
+                let (key, id, label) = (workspace.key(), workspace.handle.id(), workspace.label());
                 self.state.layout.assign(key, project.clone(), top)?;
-                if let Some(workspace) = self.state.workspaces.get_mut(&id) {
-                    workspace.extension = None;
-                }
-                self.state.observe_active();
-                let warning = self
-                    .sync_order(false)
-                    .err()
-                    .map(|error| format!("\nCould not sync COSMIC order: {error:#}"))
-                    .unwrap_or_default();
-                let name = self
+                Ok(self.finish_assignment(&id, label, &project, "Assigned"))
+            }
+            Command::MoveLeft | Command::MoveRight => {
+                let side = if matches!(command, Command::MoveLeft) {
+                    Side::Left
+                } else {
+                    Side::Right
+                };
+                let workspace = self.state.current()?;
+                let (key, id, label) = (workspace.key(), workspace.handle.id(), workspace.label());
+                let project =
+                    self.state
+                        .layout
+                        .move_to_neighbor(key, side, &self.state.default_project)?;
+                Ok(self.finish_assignment(&id, label, &project, "Moved"))
+            }
+            Command::RenameProject { name } => {
+                let key = self.state.current()?.key();
+                let from = self
                     .state
-                    .workspaces
-                    .values()
-                    .find(|w| w.serial == serial)
-                    .map_or(old_name, Workspace::label);
-                Ok(format!("Assigned {name} to {project}.{hint}{warning}"))
+                    .layout
+                    .project_name(&key)
+                    .context("active workspace is unassigned; use `cpw assign PROJECT` first")?
+                    .to_owned();
+                ensure!(
+                    from != self.state.default_project || from == name,
+                    "can't rename the default project for this run; choose a different default with `cpw serve --default-project NAME`"
+                );
+                self.state.layout.rename_project(&from, name.clone())?;
+                self.state.observe_active();
+                Ok(if from == name {
+                    format!("Project {name} will be kept even when empty.")
+                } else {
+                    format!("Renamed project {from} to {name}.")
+                })
             }
             Command::Unassign => {
                 let workspace = self.state.current()?;
@@ -253,6 +262,32 @@ impl Desktop {
                 }
             }
         }
+    }
+
+    fn finish_assignment(
+        &mut self,
+        id: &ObjectId,
+        label: String,
+        project: &str,
+        verb: &str,
+    ) -> String {
+        if let Some(workspace) = self.state.workspaces.get_mut(id) {
+            workspace.extension = None;
+        }
+        self.state.observe_active();
+        let warning = self
+            .sync_order(false)
+            .err()
+            .map(|error| format!("\nCould not sync COSMIC order: {error:#}"))
+            .unwrap_or_default();
+        let workspace = self.state.workspaces.get(id);
+        let label = workspace.map_or(label, Workspace::label);
+        let hint = if workspace.is_some_and(|w| w.id.is_none()) {
+            "\nSession only unless you pin this workspace in COSMIC."
+        } else {
+            ""
+        };
+        format!("{verb} {label} to {project}.{hint}{warning}")
     }
 
     fn extend(&mut self, current: &Key, top: bool) -> Result<String> {
@@ -735,7 +770,15 @@ impl State {
             self.write_grid(&mut text);
         } else {
             for (column, project) in self.layout.projects.iter().enumerate() {
-                writeln!(text, "{}. {}", column + 1, project.name).unwrap();
+                let temporary = if project.temporary {
+                    " [temporary]"
+                } else {
+                    ""
+                };
+                writeln!(text, "{}. {}{temporary}", column + 1, project.name).unwrap();
+                if project.members.is_empty() {
+                    writeln!(text, "   (empty)").unwrap();
+                }
                 for (row, key) in project.members.iter().enumerate() {
                     let label = match self.find(key) {
                         Some(w) if w.active() => format!("{} [active]", w.label()),
@@ -791,7 +834,7 @@ impl State {
             .projects
             .iter()
             .map(|project| {
-                let cells: Vec<_> = std::iter::once(project.name.clone())
+                let mut cells: Vec<_> = std::iter::once(project.name.clone())
                     .chain(project.members.iter().map(|key| {
                         let mut label = match self.find(key) {
                             Some(w) if w.active() => format!("[{}]", w.label()),
@@ -804,6 +847,9 @@ impl State {
                         label
                     }))
                     .collect();
+                if project.members.is_empty() {
+                    cells.push("(empty)".into());
+                }
                 let width = cells.iter().map(|cell| cell.width()).max().unwrap_or(0);
                 (cells, width)
             })
