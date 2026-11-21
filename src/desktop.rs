@@ -3,7 +3,7 @@ mod overlay;
 
 use crate::{
     Command,
-    layout::{Direction, Key, Layout, SavedLayout, Side},
+    layout::{Destination, Direction, Key, Layout, SavedLayout, Side},
     order::OrderPlan,
     project_changes::ProjectChanges,
     slide::{ANIMATION_HOLD, CONFIG_SETTLE, SlideAxis, SlideExperiment},
@@ -281,12 +281,12 @@ impl Desktop {
                 ))
             }
             Command::Go { project } => {
-                self.state.current()?;
-                let key = self
+                let current = self.state.current()?.key();
+                let target = self
                     .state
                     .layout
-                    .go(&project, |key| self.state.find(key).is_some())?;
-                self.activate(key.clone(), SlideAxis::Horizontal, None)
+                    .go(&current, &project, |key| self.state.find(key).is_some())?;
+                self.navigate(&current, target, SlideAxis::Horizontal)
             }
             Command::Left | Command::Right | Command::Up | Command::Down => {
                 let direction = match command {
@@ -302,13 +302,13 @@ impl Desktop {
                     .layout
                     .neighbor(&current, direction, |key| self.state.find(key).is_some())?;
                 match target {
-                    Some(key) => self.activate(
-                        key.clone(),
+                    Some(target) => self.navigate(
+                        &current,
+                        target,
                         match direction {
                             Direction::Left | Direction::Right => SlideAxis::Horizontal,
                             Direction::Up | Direction::Down => SlideAxis::Vertical,
                         },
-                        None,
                     ),
                     None if matches!(direction, Direction::Up | Direction::Down) => {
                         self.extend(&current, matches!(direction, Direction::Up))
@@ -316,6 +316,18 @@ impl Desktop {
                     None => Ok("No workspace in that direction.".into()),
                 }
             }
+        }
+    }
+
+    fn navigate(&mut self, current: &Key, target: Destination, axis: SlideAxis) -> Result<String> {
+        match target {
+            Destination::Workspace(key) => self.activate(key, axis, None),
+            Destination::EmptyProject { name, side } => self.borrow_spare(
+                current,
+                name,
+                SlideAxis::Horizontal,
+                matches!(side, Side::Left),
+            ),
         }
     }
 
@@ -337,7 +349,7 @@ impl Desktop {
                 .get(id)
                 .filter(|workspace| workspace.active())
         {
-            self.state.project_changes.announce_move(workspace.serial);
+            self.state.project_changes.announce_entry(workspace.serial);
         }
         let animation = movement.map(|(side, source)| MoveSlide {
             active: id,
@@ -366,13 +378,38 @@ impl Desktop {
     }
 
     fn extend(&mut self, current: &Key, top: bool) -> Result<String> {
+        let origin = self.state.current()?;
+        if origin.extension.as_ref().is_some_and(|extension| {
+            matches!(
+                extension.placement,
+                ExtensionPlacement::Top | ExtensionPlacement::BorrowedLeft
+            )
+        }) && !self.state.occupancy.has_window(&origin.handle.id())
+        {
+            return Ok("Open a window on this new row before adding another.".into());
+        }
+        let project = self
+            .state
+            .layout
+            .project_name(current)
+            .context("the active workspace is not assigned to a project")?
+            .to_owned();
+        self.borrow_spare(current, project, SlideAxis::Vertical, top)
+    }
+
+    fn borrow_spare(
+        &mut self,
+        current: &Key,
+        project: String,
+        axis: SlideAxis,
+        before: bool,
+    ) -> Result<String> {
         ensure!(
             self.state.cosmic_manager.is_some(),
-            "growing a project requires COSMIC's dynamic workspaces"
+            "borrowing the spare requires COSMIC's dynamic workspaces"
         );
-        if top && self.state.visible().any(|w| w.can_move.is_none()) {
-            // The newest spare's COSMIC handle might not have reported its
-            // capabilities during the preceding workspace roundtrip.
+        if before && self.state.visible().any(|w| w.can_move.is_none()) {
+            // Wait for the newest spare's reorder capabilities, if necessary.
             self.queue.roundtrip(&mut self.state)?;
             self.state.ensure_online()?;
         }
@@ -381,39 +418,42 @@ impl Desktop {
             &origin.key() == current,
             "active workspace changed; try again"
         );
-        if origin
-            .extension
-            .as_ref()
-            .is_some_and(|extension| extension.placement == ExtensionPlacement::Top)
-            && !self.state.occupancy.has_window(&origin.handle.id())
-        {
-            return Ok("Open a window on this new row before adding another.".into());
-        }
-        let anchor = top.then(|| origin.handle.clone());
-        let project = self
-            .state
-            .layout
-            .project_name(current)
-            .context("the active workspace is not assigned to a project")?
-            .to_owned();
+        let anchor = before.then(|| origin.handle.clone());
         let ordered = self.state.ordered_workspaces()?;
-        let Some(spare) = ordered.last().filter(|w| {
-            !w.active() && self.state.dynamic_empty(w) && !self.state.layout.contains(&w.key())
-        }) else {
+        let Some(spare) = ordered
+            .last()
+            .filter(|w| self.state.dynamic_empty(w) && !self.state.layout.contains(&w.key()))
+        else {
             return Ok("No empty trailing workspace is available yet.".into());
         };
         let key = spare.key();
         let id = spare.handle.id();
+        let serial = spare.serial;
+        let already_active = spare.active();
 
-        // Attach in memory first so the project stays in place even if COSMIC
-        // drops its old empty workspace when we leave. The native spare is
-        // already below us for Down; Up needs it moved above us at activation.
+        // Assign before activation so the confirmed switch sees the new project.
+        // The spare is already after us for right/down; left/up needs an anchor.
         self.state
             .layout
-            .assign(key.clone(), project.clone(), top)?;
+            .assign(key.clone(), project.clone(), before)?;
+        let placement = match (axis, before) {
+            (SlideAxis::Vertical, true) => ExtensionPlacement::Top,
+            (SlideAxis::Horizontal, true) => ExtensionPlacement::BorrowedLeft,
+            (_, false) => ExtensionPlacement::BorrowedTail,
+        };
+        self.state.workspaces.get_mut(&id).unwrap().extension = Some(Extension {
+            placement,
+            inactive_since: None,
+        });
         self.state.observe_active();
-        if let Err(error) = self.activate(key.clone(), SlideAxis::Vertical, anchor.as_ref()) {
-            let key = self.state.workspaces.get(&id).map_or(key, Workspace::key);
+        if already_active {
+            // `go PROJECT` can borrow the spare we are already sitting on.
+            self.state.project_changes.announce_entry(serial);
+        } else if let Err(error) = self.activate(key.clone(), axis, anchor.as_ref()) {
+            let key = self.state.workspaces.get_mut(&id).map_or(key, |workspace| {
+                workspace.extension = None;
+                workspace.key()
+            });
             self.state.layout.release_extension(&key);
             self.state.observe_active();
             return Err(error);
@@ -421,20 +461,17 @@ impl Desktop {
         let workspace = self
             .state
             .workspaces
-            .get_mut(&id)
+            .get(&id)
             .context("the new row is no longer available")?;
-        workspace.extension = Some(Extension {
-            placement: if top {
-                ExtensionPlacement::Top
-            } else {
-                ExtensionPlacement::BorrowedBottom
-            },
-            inactive_since: None,
-        });
         let label = workspace.label();
         self.state.observe_active();
-        let row = if top { "top row" } else { "row" };
-        Ok(format!("Opened {label} as a new {row} in {project}."))
+        match axis {
+            SlideAxis::Horizontal => Ok(format!("Entered {project} on {label}.")),
+            SlideAxis::Vertical => {
+                let row = if before { "top row" } else { "row" };
+                Ok(format!("Opened {label} as a new {row} in {project}."))
+            }
+        }
     }
 
     fn maintain_layout(&mut self) {
@@ -443,7 +480,7 @@ impl Desktop {
         if self.state.assign_defaults() {
             self.state.observe_active();
         }
-        let assigned = std::mem::take(&mut self.state.default_order_changed);
+        let assigned = std::mem::take(&mut self.state.assignment_order_changed);
         if (extended || assigned)
             && let Err(error) = self.sync_order(false)
         {
@@ -479,7 +516,7 @@ impl Desktop {
             .flat_map(|project| &project.members)
             .filter_map(|key| {
                 let workspace = self.state.find(key)?;
-                (!workspace.is_borrowed()).then_some(workspace.serial)
+                (!workspace.needs_alignment()).then_some(workspace.serial)
             })
             .collect();
         let plan = OrderPlan::new(&ids, &managed);
@@ -701,7 +738,7 @@ struct State {
     next_serial: u64,
     layout: Layout,
     default_project: String,
-    default_order_changed: bool,
+    assignment_order_changed: bool,
     project_changes: ProjectChanges,
     defer_active_observation: bool,
     occupancy: Occupancy,
@@ -728,11 +765,12 @@ struct Extension {
     inactive_since: Option<Instant>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 enum ExtensionPlacement {
     Top,
-    BorrowedBottom,
-    AlignedBottom,
+    BorrowedTail,
+    BorrowedLeft,
+    Aligned,
 }
 
 impl Workspace {
@@ -751,10 +789,13 @@ impl Workspace {
         format!("workspace {}", self.name.as_deref().unwrap_or("(unnamed)"))
     }
 
-    fn is_borrowed(&self) -> bool {
-        self.extension
-            .as_ref()
-            .is_some_and(|loan| loan.placement == ExtensionPlacement::BorrowedBottom)
+    fn needs_alignment(&self) -> bool {
+        self.extension.as_ref().is_some_and(|loan| {
+            matches!(
+                loan.placement,
+                ExtensionPlacement::BorrowedTail | ExtensionPlacement::BorrowedLeft
+            )
+        })
     }
 }
 
@@ -797,7 +838,9 @@ impl State {
     }
 
     fn dynamic_empty(&self, workspace: &Workspace) -> bool {
-        workspace.id.is_none() && !self.occupancy.has_window(&workspace.handle.id())
+        workspace.id.is_none()
+            && !workspace.pinned
+            && !self.occupancy.has_window(&workspace.handle.id())
     }
 
     fn slide_reference<'a>(
@@ -864,7 +907,7 @@ impl State {
         let assigned = self
             .layout
             .assign_missing(&self.default_project, candidates);
-        self.default_order_changed |= assigned;
+        self.assignment_order_changed |= assigned;
         assigned
     }
 
@@ -895,9 +938,10 @@ impl State {
             let Some(extension) = workspace.extension.as_mut() else {
                 continue;
             };
+            let occupied = self.occupancy.has_window(&workspace.handle.id());
             if !self.layout.contains(&key) {
                 workspace.extension = None;
-            } else if workspace.serial == tail_serial && !active {
+            } else if workspace.serial == tail_serial && !active && !occupied && !workspace.pinned {
                 // COSMIC keeps the last empty workspace even after you leave
                 // it. Drop our assignment so another project can borrow it.
                 let since = extension.inactive_since.get_or_insert(now);
@@ -908,13 +952,18 @@ impl State {
                 }
             } else {
                 extension.inactive_since = None;
-                // COSMIC appended a new spare behind this one, so it no
-                // longer needs to be held out of the native project block.
-                if extension.placement == ExtensionPlacement::BorrowedBottom
-                    && tail_serial > workspace.serial
-                    && workspace.coordinate < tail_position
-                {
-                    extension.placement = ExtensionPlacement::AlignedBottom;
+                let ready = match extension.placement {
+                    // The tail loan can join the block once COSMIC has made a new spare.
+                    ExtensionPlacement::BorrowedTail => {
+                        tail_serial > workspace.serial && workspace.coordinate < tail_position
+                    }
+                    // A leftward loan was placed before the outgoing workspace for the
+                    // slide, not necessarily at the start of its project block.
+                    ExtensionPlacement::BorrowedLeft => occupied,
+                    _ => false,
+                };
+                if ready {
+                    extension.placement = ExtensionPlacement::Aligned;
                     sync = true;
                 }
             }
@@ -1187,6 +1236,7 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for State {
         match event {
             workspace::Event::Id { id } => {
                 if !id.is_empty() {
+                    state.assignment_order_changed |= w.needs_alignment();
                     state.layout.promote(w.key(), Key::Stable(id.clone()));
                     w.id = Some(id);
                     w.extension = None;

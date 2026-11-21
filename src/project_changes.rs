@@ -50,9 +50,9 @@ impl ProjectChanges {
         Some((change, position))
     }
 
-    pub fn announce_move(&mut self, workspace: u64) {
-        // Explicit transfers enter a different project without changing the
-        // active workspace. Other assignment edits should still be quiet.
+    pub fn announce_entry(&mut self, workspace: u64) {
+        // Transfers and `go` from the spare can enter a different project
+        // without changing the active workspace. Ordinary edits stay quiet.
         if let Some((active, Some(_))) = &self.active
             && *active == workspace
         {
@@ -128,9 +128,9 @@ mod tests {
         changes.observe(at(1, "Work", 1, 1));
         changes.observe(at(1, "Personal", 2, 3));
         assert!(matches!(changes.take(), Some((Change::Layout, _))));
-        changes.announce_move(2);
+        changes.announce_entry(2);
         assert!(changes.take().is_none());
-        changes.announce_move(1);
+        changes.announce_entry(1);
         assert_position(&mut changes, Change::Project, ("Personal", 2, 3));
         assert!(changes.take().is_none());
     }

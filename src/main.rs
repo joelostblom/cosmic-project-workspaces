@@ -82,11 +82,11 @@ enum Command {
     Unassign,
     /// Remove a project and return its workspaces to the default project
     Forget { project: String },
-    /// Return to the last-used workspace in a named project
+    /// Enter a named project, borrowing an empty workspace if needed
     Go { project: String },
-    /// Switch left to the neighboring project's last-used workspace
+    /// Switch to the project on the left, borrowing an empty workspace if needed
     Left,
-    /// Switch right to the neighboring project's last-used workspace
+    /// Switch to the project on the right, borrowing an empty workspace if needed
     Right,
     /// Move the entire active workspace to the column on the left
     MoveLeft,

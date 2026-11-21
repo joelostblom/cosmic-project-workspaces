@@ -25,10 +25,16 @@ pub enum Direction {
     Down,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
     Left,
     Right,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Destination {
+    Workspace(Key),
+    EmptyProject { name: String, side: Side },
 }
 
 #[derive(Default)]
@@ -60,11 +66,22 @@ impl Project {
         }
     }
 
-    pub fn entry(&self, available: impl Fn(&Key) -> bool) -> Option<&Key> {
+    fn entry(&self, available: impl Fn(&Key) -> bool) -> Option<&Key> {
         self.last
             .as_ref()
             .filter(|key| available(key))
             .or_else(|| self.members.iter().find(|key| available(key)))
+    }
+
+    fn destination(&self, side: Side, available: impl Fn(&Key) -> bool) -> Option<Destination> {
+        if self.members.is_empty() {
+            Some(Destination::EmptyProject {
+                name: self.name.clone(),
+                side,
+            })
+        } else {
+            self.entry(available).cloned().map(Destination::Workspace)
+        }
     }
 }
 
@@ -346,12 +363,25 @@ impl Layout {
         })
     }
 
-    pub fn go(&self, name: &str, available: impl Fn(&Key) -> bool) -> Result<&Key> {
-        let Some(project) = self.projects.iter().find(|p| p.name == name) else {
+    pub fn go(
+        &self,
+        current: &Key,
+        name: &str,
+        available: impl Fn(&Key) -> bool,
+    ) -> Result<Destination> {
+        let Some(target) = self.project_index(name) else {
             bail!("unknown project {name:?}");
         };
-        project
-            .entry(available)
+        let side = if self
+            .position(current)
+            .is_some_and(|(from, _)| target < from)
+        {
+            Side::Left
+        } else {
+            Side::Right
+        };
+        self.projects[target]
+            .destination(side, available)
             .ok_or_else(|| anyhow::anyhow!("no workspaces in {name:?} are available"))
     }
 
@@ -360,7 +390,7 @@ impl Layout {
         current: &Key,
         direction: Direction,
         available: impl Fn(&Key) -> bool,
-    ) -> Result<Option<&Key>> {
+    ) -> Result<Option<Destination>> {
         let Some((column, row)) = self.position(current) else {
             bail!("active workspace is unassigned; use `cpw go PROJECT` or `cpw assign PROJECT`");
         };
@@ -369,12 +399,21 @@ impl Layout {
             Direction::Left => self.projects[..column]
                 .iter()
                 .rev()
-                .find_map(|project| project.entry(&available)),
+                .find_map(|project| project.destination(Side::Left, &available)),
             Direction::Right => self.projects[column + 1..]
                 .iter()
-                .find_map(|project| project.entry(&available)),
-            Direction::Up => members[..row].iter().rev().find(|key| available(key)),
-            Direction::Down => members[row + 1..].iter().find(|key| available(key)),
+                .find_map(|project| project.destination(Side::Right, &available)),
+            Direction::Up => members[..row]
+                .iter()
+                .rev()
+                .find(|key| available(key))
+                .cloned()
+                .map(Destination::Workspace),
+            Direction::Down => members[row + 1..]
+                .iter()
+                .find(|key| available(key))
+                .cloned()
+                .map(Destination::Workspace),
         })
     }
 }
@@ -424,14 +463,24 @@ mod tests {
     }
 
     #[test]
-    fn moving_uses_the_empty_neighbor_that_navigation_skips() {
+    fn navigation_borrows_for_an_empty_neighbor_but_a_transfer_moves_the_existing_row() {
         let mut layout = Layout::initial("Work", Vec::new()).unwrap();
         let (work, hobby) = (stable("work"), stable("hobby"));
         layout.assign(work.clone(), "Work".into(), false).unwrap();
         layout.assign(hobby.clone(), "Hobby".into(), false).unwrap();
         assert_eq!(
             layout.neighbor(&work, Direction::Right, |_| true).unwrap(),
-            Some(&hobby)
+            Some(Destination::EmptyProject {
+                name: "Personal".into(),
+                side: Side::Right,
+            })
+        );
+        assert_eq!(
+            layout.neighbor(&hobby, Direction::Left, |_| true).unwrap(),
+            Some(Destination::EmptyProject {
+                name: "Personal".into(),
+                side: Side::Left,
+            })
         );
         assert_eq!(
             layout
@@ -446,6 +495,32 @@ mod tests {
                 .move_to_neighbor(Key::Session(99), Side::Right, "Work")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn go_can_target_an_empty_project_from_either_side_or_the_unassigned_spare() {
+        let mut layout = Layout::initial(
+            "Work",
+            vec!["Study".into(), "Work".into(), "Personal".into()],
+        )
+        .unwrap();
+        let work = stable("work");
+        layout.assign(work.clone(), "Work".into(), false).unwrap();
+        for (current, project, side) in [
+            (&work, "Study", Side::Left),
+            (&work, "Personal", Side::Right),
+            (&Key::Session(1), "Personal", Side::Right),
+        ] {
+            assert_eq!(
+                layout.go(current, project, |_| true).unwrap(),
+                Destination::EmptyProject {
+                    name: project.into(),
+                    side
+                }
+            );
+        }
+        assert!(layout.go(&work, "Work", |_| false).is_err()); // Unavailable isn't empty.
+        assert!(layout.go(&work, "Unknown", |_| true).is_err());
     }
 
     #[test]
@@ -490,7 +565,10 @@ mod tests {
             .unwrap();
         assert!(layout.rename_project("Project 1", "Work".into()).is_err());
         layout.rename_project("Project 1", "Study".into()).unwrap();
-        assert_eq!(layout.go("Study", |_| true).unwrap(), &key);
+        assert_eq!(
+            layout.go(&key, "Study", |_| true).unwrap(),
+            Destination::Workspace(key.clone())
+        );
         layout.move_to_neighbor(key, Side::Left, "Work").unwrap();
         let restored = Layout::restore(layout.snapshot()).unwrap();
         assert_eq!(names(&restored), ["Work", "Personal", "Study"]);
@@ -531,7 +609,10 @@ mod tests {
         ));
         assert_eq!(layout.projects[0].members, [work.clone(), other, another]);
         assert_eq!(layout.project_name(&personal), Some("Personal"));
-        assert_eq!(layout.go("Work", |_| true).unwrap(), &work);
+        assert_eq!(
+            layout.go(&personal, "Work", |_| true).unwrap(),
+            Destination::Workspace(work.clone())
+        );
         assert!(!layout.assign_missing("Other", vec![work, personal]));
         assert_eq!(layout.projects.len(), 2);
     }
@@ -545,7 +626,10 @@ mod tests {
         layout.assign(bottom.clone(), "Work".into(), false).unwrap();
         layout.assign(spare.clone(), "Work".into(), false).unwrap();
         layout.release_extension(&spare);
-        assert_eq!(layout.go("Work", |_| true).unwrap(), &bottom);
+        assert_eq!(
+            layout.go(&bottom, "Work", |_| true).unwrap(),
+            Destination::Workspace(bottom.clone())
+        );
     }
 
     #[test]
@@ -558,14 +642,17 @@ mod tests {
         l.observe_active(b.clone()); // e.g. switching with COSMIC controls
         assert_eq!(
             l.neighbor(&a, Direction::Right, |_| true).unwrap(),
-            Some(&b)
+            Some(Destination::Workspace(b))
         );
         l.observe_active(c.clone());
         assert_eq!(
             l.neighbor(&a, Direction::Right, |_| true).unwrap(),
-            Some(&c)
+            Some(Destination::Workspace(c.clone()))
         );
-        assert_eq!(l.neighbor(&c, Direction::Left, |_| true).unwrap(), Some(&a));
+        assert_eq!(
+            l.neighbor(&c, Direction::Left, |_| true).unwrap(),
+            Some(Destination::Workspace(a))
+        );
     }
 
     #[test]
@@ -576,11 +663,11 @@ mod tests {
         l.assign(top.clone(), "Work".into(), true).unwrap();
         assert_eq!(
             l.neighbor(&top, Direction::Down, |_| true).unwrap(),
-            Some(&bottom)
+            Some(Destination::Workspace(bottom.clone()))
         );
         assert_eq!(
             l.neighbor(&bottom, Direction::Up, |_| true).unwrap(),
-            Some(&top)
+            Some(Destination::Workspace(top.clone()))
         );
         assert_eq!(l.neighbor(&top, Direction::Up, |_| true).unwrap(), None);
         assert_eq!(
@@ -600,7 +687,7 @@ mod tests {
         let available = |key: &Key| *key != b && *key != d;
         assert_eq!(
             l.neighbor(&a, Direction::Right, available).unwrap(),
-            Some(&c)
+            Some(Destination::Workspace(c))
         );
     }
 
@@ -628,8 +715,17 @@ mod tests {
         l.assign(a.clone(), "Work".into(), false).unwrap();
         l.assign(a.clone(), "Personal".into(), false).unwrap();
         assert_eq!(names(&l), ["Work", "Personal"]);
-        assert!(l.go("Work", |_| true).is_err());
-        assert_eq!(l.go("Personal", |_| true).unwrap(), &a);
+        assert_eq!(
+            l.go(&a, "Work", |_| true).unwrap(),
+            Destination::EmptyProject {
+                name: "Work".into(),
+                side: Side::Left,
+            }
+        );
+        assert_eq!(
+            l.go(&a, "Personal", |_| true).unwrap(),
+            Destination::Workspace(a.clone())
+        );
         assert!(l.unassign(&a));
         assert!(l.projects.iter().all(|p| p.members.is_empty()));
     }
