@@ -1,6 +1,7 @@
 mod render;
 
 use super::State;
+use crate::{layout::ProjectPosition, project_changes::Change};
 use anyhow::{Context, Result};
 use render::BannerRenderer;
 use rustix::fs::{MemfdFlags, memfd_create};
@@ -27,23 +28,62 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 
-const WIDTH: u32 = 660;
-const HEIGHT: u32 = 204;
 const SCALE: i32 = 2;
 const DISPLAY_TIME: Duration = Duration::from_millis(1100);
+const RIGHT_MARGIN: i32 = 12;
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Project,
+    Workspaces,
+}
+
+impl Kind {
+    const ALL: [Self; 2] = [Self::Project, Self::Workspaces];
+
+    fn size(self) -> (u32, u32) {
+        match self {
+            Self::Project => (660, 204),
+            // A fixed transparent canvas lets the dots grow and shrink in place.
+            Self::Workspaces => (28, 384),
+        }
+    }
+
+    fn namespace(self) -> &'static str {
+        match self {
+            Self::Project => "cpw-project-banner",
+            Self::Workspaces => "cpw-workspace-dots",
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum Content {
+    Project(String),
+    Workspaces { row: usize, total: usize },
+}
+
+impl Content {
+    fn kind(&self) -> Kind {
+        match self {
+            Self::Project(_) => Kind::Project,
+            Self::Workspaces { .. } => Kind::Workspaces,
+        }
+    }
+}
 
 pub(super) struct Overlay {
     compositor: WlCompositor,
     shell: ZwlrLayerShellV1,
     shm: WlShm,
     renderer: BannerRenderer,
-    banner: Option<Banner>,
+    popups: [Option<Popup>; Kind::ALL.len()],
 }
 
-struct Banner {
+struct Popup {
     surface: WlSurface,
     layer: ZwlrLayerSurfaceV1,
-    title: String,
+    content: Content,
     deadline: Instant,
     configured_size: Option<(u32, u32)>,
 }
@@ -61,17 +101,53 @@ impl Overlay {
                 .bind(queue, 1..=1, ())
                 .context("no Wayland shared memory")?,
             renderer: BannerRenderer::new()?,
-            banner: None,
+            popups: [None, None],
         })
     }
 
-    pub(super) fn show(&mut self, title: &str, queue: &QueueHandle<State>) -> Result<()> {
-        if let Some(banner) = self.banner.as_mut() {
-            banner.title = title.to_owned();
-            banner.deadline = Instant::now() + DISPLAY_TIME;
-            if let Err(error) = self.paint(queue) {
-                self.hide();
-                return Err(error);
+    pub(super) fn update(
+        &mut self,
+        change: Change,
+        position: Option<&ProjectPosition>,
+        queue: &QueueHandle<State>,
+    ) {
+        let Some(position) = position else {
+            for kind in Kind::ALL {
+                self.hide(kind);
+            }
+            return;
+        };
+        let dots = Content::Workspaces {
+            row: position.row,
+            total: position.total,
+        };
+        if change != Change::Layout {
+            self.show(dots, queue);
+        } else if let Some(popup) = &mut self.popups[Kind::Workspaces as usize]
+            && popup.content != dots
+        {
+            // Update a visible indicator when a row disappears, without
+            // extending its timer or popping it up on a quiet layout edit.
+            popup.content = dots;
+            self.redraw(Kind::Workspaces, queue);
+        }
+        if change == Change::Project {
+            self.show(Content::Project(position.name.clone()), queue);
+        } else {
+            // Only the dots should remain visible when moving within a project.
+            self.hide(Kind::Project);
+        }
+    }
+
+    fn show(&mut self, content: Content, queue: &QueueHandle<State>) {
+        let kind = content.kind();
+        let slot = &mut self.popups[kind as usize];
+        let deadline = Instant::now() + DISPLAY_TIME;
+        if let Some(popup) = slot {
+            popup.deadline = deadline;
+            if popup.content != content {
+                popup.content = content;
+                self.redraw(kind, queue);
             }
         } else {
             let surface = self.compositor.create_surface(queue, ());
@@ -83,61 +159,80 @@ impl Overlay {
                 &surface,
                 None,
                 Layer::Overlay,
-                "cpw-project-banner".into(),
+                kind.namespace().into(),
                 queue,
-                (),
+                kind,
             );
-            layer.set_anchor(Anchor::empty()); // Center on both axes.
-            layer.set_size(WIDTH, HEIGHT);
-            layer.set_exclusive_zone(-1); // Center on the output, not the area within panels.
+            match kind {
+                Kind::Project => layer.set_anchor(Anchor::empty()),
+                Kind::Workspaces => {
+                    // A single right anchor leaves the surface centered vertically.
+                    layer.set_anchor(Anchor::Right);
+                    layer.set_margin(0, RIGHT_MARGIN, 0, 0);
+                }
+            }
+            let (width, height) = kind.size();
+            layer.set_size(width, height);
+            layer.set_exclusive_zone(-1); // Position against the whole output, ignoring panels.
             layer.set_keyboard_interactivity(KeyboardInteractivity::None);
             surface.commit(); // An unbuffered commit asks for the first configure.
-            self.banner = Some(Banner {
+            *slot = Some(Popup {
                 surface,
                 layer,
-                title: title.to_owned(),
-                deadline: Instant::now() + DISPLAY_TIME,
+                content,
+                deadline,
                 configured_size: None,
             });
         }
-        Ok(())
     }
 
     pub(super) fn expire(&mut self, now: Instant) {
-        if self
-            .banner
-            .as_ref()
-            .is_some_and(|banner| now >= banner.deadline)
-        {
-            self.hide();
+        for kind in Kind::ALL {
+            if self.popups[kind as usize]
+                .as_ref()
+                .is_some_and(|popup| now >= popup.deadline)
+            {
+                self.hide(kind);
+            }
         }
     }
 
     pub(super) fn time_remaining(&self, now: Instant) -> Option<Duration> {
-        self.banner
-            .as_ref()
-            .map(|banner| banner.deadline.saturating_duration_since(now))
+        self.popups
+            .iter()
+            .flatten()
+            .map(|popup| popup.deadline.saturating_duration_since(now))
+            .min()
     }
 
-    fn hide(&mut self) {
-        if let Some(banner) = self.banner.take() {
-            banner.layer.destroy();
-            banner.surface.destroy();
+    fn hide(&mut self, kind: Kind) {
+        if let Some(popup) = self.popups[kind as usize].take() {
+            popup.layer.destroy();
+            popup.surface.destroy();
         }
     }
 
-    fn paint(&mut self, queue: &QueueHandle<State>) -> Result<()> {
-        let Some(banner) = self.banner.as_ref() else {
+    fn redraw(&mut self, kind: Kind, queue: &QueueHandle<State>) {
+        if let Err(error) = self.paint(kind, queue) {
+            eprintln!("Could not render {}: {error:#}", kind.namespace());
+            self.hide(kind);
+        }
+    }
+
+    fn paint(&mut self, kind: Kind, queue: &QueueHandle<State>) -> Result<()> {
+        let Some(popup) = &self.popups[kind as usize] else {
             return Ok(());
         };
-        let Some((width, height)) = banner.configured_size else {
+        let Some((width, height)) = popup.configured_size else {
             return Ok(());
         };
         let (width, height) = (width as i32 * SCALE, height as i32 * SCALE);
-        let pixels = self
-            .renderer
-            .render(&banner.title, width as usize, height as usize);
-        let mut file = File::from(memfd_create("cpw-project-banner", MemfdFlags::CLOEXEC)?);
+        let (w, h) = (width as usize, height as usize);
+        let pixels = match &popup.content {
+            Content::Project(title) => self.renderer.render(title, w, h),
+            Content::Workspaces { row, total } => render::workspace_dots(*row, *total, w, h),
+        };
+        let mut file = File::from(memfd_create(kind.namespace(), MemfdFlags::CLOEXEC)?);
         file.write_all(&pixels)?;
         let pool = self
             .shm
@@ -152,9 +247,9 @@ impl Overlay {
             (),
         );
         pool.destroy();
-        banner.surface.attach(Some(&buffer), 0, 0);
-        banner.surface.damage_buffer(0, 0, width, height);
-        banner.surface.commit();
+        popup.surface.attach(Some(&buffer), 0, 0);
+        popup.surface.damage_buffer(0, 0, width, height);
+        popup.surface.commit();
         Ok(())
     }
 }
@@ -181,22 +276,21 @@ impl Dispatch<WlBuffer, ()> for State {
     }
 }
 
-impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
+impl Dispatch<ZwlrLayerSurfaceV1, Kind> for State {
     fn event(
         state: &mut Self,
         layer: &ZwlrLayerSurfaceV1,
         event: zwlr_layer_surface_v1::Event,
-        _: &(),
+        &kind: &Kind,
         _: &Connection,
         queue: &QueueHandle<Self>,
     ) {
         let Some(overlay) = state.overlay.as_mut() else {
             return;
         };
-        let Some(banner) = overlay
-            .banner
+        let Some(popup) = overlay.popups[kind as usize]
             .as_mut()
-            .filter(|banner| &banner.layer == layer)
+            .filter(|popup| &popup.layer == layer)
         else {
             return;
         };
@@ -214,13 +308,11 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
                         offered.min(maximum)
                     }
                 };
-                banner.configured_size = Some((size(width, WIDTH), size(height, HEIGHT)));
-                if let Err(error) = overlay.paint(queue) {
-                    eprintln!("Could not render the project overlay: {error:#}");
-                    overlay.hide();
-                }
+                let (max_width, max_height) = kind.size();
+                popup.configured_size = Some((size(width, max_width), size(height, max_height)));
+                overlay.redraw(kind, queue);
             }
-            zwlr_layer_surface_v1::Event::Closed => overlay.hide(),
+            zwlr_layer_surface_v1::Event::Closed => overlay.hide(kind),
             _ => {}
         }
     }

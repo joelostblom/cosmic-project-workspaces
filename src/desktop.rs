@@ -106,16 +106,13 @@ impl Desktop {
     }
 
     fn update_overlay(&mut self) -> Option<Duration> {
-        let title = self.state.project_changes.take();
+        let change = self.state.project_changes.take();
         let overlay = self.state.overlay.as_mut()?;
-        if let Some(title) = title
-            && let Err(error) = overlay.show(&title, &self.queue.handle())
-        {
-            eprintln!("Could not show the project overlay: {error:#}");
+        overlay.expire(Instant::now());
+        if let Some((change, position)) = change {
+            overlay.update(change, position, &self.queue.handle());
         }
-        let now = Instant::now();
-        overlay.expire(now);
-        overlay.time_remaining(now)
+        overlay.time_remaining(Instant::now())
     }
 
     pub fn wait(&mut self, listener: &UnixListener) -> Result<bool> {
@@ -891,6 +888,7 @@ impl State {
         };
         let (tail_serial, tail_position) = (tail.serial, tail.coordinate);
         let mut sync = false;
+        let mut released = false;
         for workspace in self.workspaces.values_mut() {
             let key = workspace.key();
             let active = workspace.active();
@@ -906,6 +904,7 @@ impl State {
                 if now.duration_since(*since) >= LOAN_GRACE {
                     self.layout.release_extension(&key);
                     workspace.extension = None;
+                    released = true;
                 }
             } else {
                 extension.inactive_since = None;
@@ -919,6 +918,9 @@ impl State {
                     sync = true;
                 }
             }
+        }
+        if released {
+            self.observe_active();
         }
         sync
     }

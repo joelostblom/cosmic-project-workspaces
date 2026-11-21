@@ -1,53 +1,69 @@
 use crate::layout::ProjectPosition;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    Project,
+    Workspace,
+    Layout,
+}
+
 #[derive(Default)]
 pub struct ProjectChanges {
     active: Option<(u64, Option<ProjectPosition>)>,
-    pending: Option<String>,
+    pending: Option<Change>,
 }
 
 impl ProjectChanges {
     pub fn observe(&mut self, active: Option<(u64, Option<ProjectPosition>)>) {
         match (&self.active, &active) {
             (Some((previous, before)), Some((current, after))) => {
-                let before = before.as_ref().map(|position| &position.name);
-                let after_name = after.as_ref().map(|position| &position.name);
-                if before != after_name {
-                    // Edits can change the project mapping without changing desktops.
-                    self.pending = if previous != current {
-                        after.as_ref().map(ProjectPosition::title)
+                let changed_project =
+                    before.as_ref().map(|p| &p.name) != after.as_ref().map(|p| &p.name);
+                if previous != current {
+                    self.pending = Some(if after.is_none() {
+                        Change::Layout
+                    } else if changed_project || self.pending == Some(Change::Project) {
+                        // Keep a project entry queued if a newer row arrives in the same batch.
+                        Change::Project
                     } else {
-                        None
-                    };
-                } else if self.pending.is_some() {
-                    // Carry the latest row into a banner already queued in this batch.
-                    self.pending = after.as_ref().map(ProjectPosition::title);
+                        Change::Workspace
+                    });
+                } else if changed_project {
+                    // Reassignment or a rename doesn't announce a switch.
+                    self.pending = Some(Change::Layout);
+                } else if before != after {
+                    self.pending.get_or_insert(Change::Layout);
                 }
             }
-            (_, None) => self.pending = None,
+            (Some(_), None) => self.pending = Some(Change::Layout),
             _ => {}
         }
         self.active = active;
     }
 
-    pub fn take(&mut self) -> Option<String> {
-        self.pending.take()
+    pub fn take(&mut self) -> Option<(Change, Option<&ProjectPosition>)> {
+        let change = self.pending.take()?;
+        let position = self
+            .active
+            .as_ref()
+            .and_then(|(_, position)| position.as_ref());
+        Some((change, position))
     }
 
     pub fn announce_move(&mut self, workspace: u64) {
         // Explicit transfers enter a different project without changing the
         // active workspace. Other assignment edits should still be quiet.
-        if let Some((active, Some(position))) = &self.active
+        if let Some((active, Some(_))) = &self.active
             && *active == workspace
         {
-            self.pending = Some(position.title());
+            self.pending = Some(Change::Project);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectChanges, ProjectPosition};
+    use super::*;
 
     fn at(
         serial: u64,
@@ -65,21 +81,32 @@ mod tests {
         ))
     }
 
+    fn assert_position(changes: &mut ProjectChanges, kind: Change, expected: (&str, usize, usize)) {
+        let (change, position) = changes.take().expect("expected an overlay update");
+        let p = position.expect("expected an assigned workspace");
+        assert_eq!(change, kind);
+        assert_eq!((p.name.as_str(), p.row, p.total), expected);
+    }
+
     #[test]
-    fn announces_only_entry_to_a_different_assigned_project() {
+    fn distinguishes_project_entries_from_workspace_switches_and_layout_edits() {
         let mut changes = ProjectChanges::default();
         changes.observe(at(1, "Work", 1, 2));
-        assert_eq!(changes.take(), None); // Initial snapshot.
+        assert!(changes.take().is_none()); // Initial snapshot.
         changes.observe(at(2, "Work", 2, 2));
-        assert_eq!(changes.take(), None); // A different row.
+        assert_position(&mut changes, Change::Workspace, ("Work", 2, 2));
+        changes.observe(at(2, "Work", 1, 1)); // Layout shrank in place.
+        assert_position(&mut changes, Change::Layout, ("Work", 1, 1));
+        changes.observe(at(2, "Work", 1, 1));
+        assert!(changes.take().is_none()); // No actual change.
         changes.observe(at(3, "Personal", 2, 3));
-        assert_eq!(changes.take().as_deref(), Some("Personal (2/3)"));
+        assert_position(&mut changes, Change::Project, ("Personal", 2, 3));
         changes.observe(at(3, "Hobby", 1, 1));
-        assert_eq!(changes.take(), None); // An assignment edit.
+        assert_position(&mut changes, Change::Layout, ("Hobby", 1, 1));
         changes.observe(Some((4, None)));
-        assert_eq!(changes.take(), None);
+        assert!(matches!(changes.take(), Some((Change::Layout, None))));
         changes.observe(at(1, "Work", 1, 2));
-        assert_eq!(changes.take().as_deref(), Some("Work (1/2)"));
+        assert_position(&mut changes, Change::Project, ("Work", 1, 2));
     }
 
     #[test]
@@ -89,10 +116,10 @@ mod tests {
         changes.observe(at(2, "Personal", 1, 1));
         changes.observe(at(3, "Hobby", 1, 2));
         changes.observe(at(5, "Hobby", 2, 2));
-        assert_eq!(changes.take().as_deref(), Some("Hobby (2/2)"));
+        assert_position(&mut changes, Change::Project, ("Hobby", 2, 2));
         changes.observe(at(2, "Personal", 1, 1));
         changes.observe(Some((4, None)));
-        assert_eq!(changes.take(), None);
+        assert!(matches!(changes.take(), Some((Change::Layout, None))));
     }
 
     #[test]
@@ -100,11 +127,11 @@ mod tests {
         let mut changes = ProjectChanges::default();
         changes.observe(at(1, "Work", 1, 1));
         changes.observe(at(1, "Personal", 2, 3));
-        assert_eq!(changes.take(), None);
+        assert!(matches!(changes.take(), Some((Change::Layout, _))));
         changes.announce_move(2);
-        assert_eq!(changes.take(), None);
+        assert!(changes.take().is_none());
         changes.announce_move(1);
-        assert_eq!(changes.take().as_deref(), Some("Personal (2/3)"));
-        assert_eq!(changes.take(), None);
+        assert_position(&mut changes, Change::Project, ("Personal", 2, 3));
+        assert!(changes.take().is_none());
     }
 }

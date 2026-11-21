@@ -5,6 +5,10 @@ use cosmic_text::{
 
 use super::SCALE;
 
+const BACKGROUND: Color = Color::rgba(21, 24, 32, 195);
+const ACTIVE_DOT: Color = Color::rgb(255, 255, 255);
+const INACTIVE_DOT: Color = Color::rgb(154, 160, 170);
+
 pub(super) struct BannerRenderer {
     fonts: FontSystem,
     glyphs: SwashCache,
@@ -55,17 +59,14 @@ impl BannerRenderer {
         let half_h = (text_size.1 / 2.0 + pad_y).min((cy - 1.0).max(0.0));
         let radius = (18.0 * scale).min(half_w).min(half_h);
         let mut pixels = vec![0_u32; width * height];
-        for y in ((cy - half_h).floor() as usize)..((cy + half_h).ceil() as usize) {
-            for x in ((cx - half_w).floor() as usize)..((cx + half_w).ceil() as usize) {
-                // Rounded rectangle signed distance, with a one-pixel
-                // antialiasing ramp at the edge.
-                let dx = (x as f32 + 0.5 - cx).abs() - (half_w - radius);
-                let dy = (y as f32 + 0.5 - cy).abs() - (half_h - radius);
-                let distance = dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius;
-                let a = (195.0 * (0.5 - distance).clamp(0.0, 1.0)).round() as u8;
-                blend(&mut pixels[y * width + x], Color::rgba(21, 24, 32, a));
-            }
-        }
+        rounded_rect(
+            &mut pixels,
+            width,
+            (cx, cy),
+            (half_w, half_h),
+            radius,
+            BACKGROUND,
+        );
         let (text_x, text_y) = (
             (cx - wrap_width / 2.0).round() as i32,
             (cy - text_size.1 / 2.0).round() as i32,
@@ -84,6 +85,60 @@ impl BannerRenderer {
             },
         );
         pixels.into_iter().flat_map(u32::to_ne_bytes).collect()
+    }
+}
+
+pub(super) fn workspace_dots(row: usize, total: usize, width: usize, height: usize) -> Vec<u8> {
+    let scale = SCALE as f32;
+    let (cx, cy) = (width as f32 / 2.0, height as f32 / 2.0);
+    let half_w = cx - 0.5;
+    let pad = (10.0 * scale).min(cy / 3.0);
+    // Compress long columns to fit while keeping the active dot in its true row.
+    let spacing = (24.0 * scale).min(2.0 * (cy - pad - 0.5) / total as f32);
+    let active_radius = (4.5 * scale).min(spacing * 0.35).min(half_w / 2.0);
+    let span = (total - 1) as f32 * spacing;
+    let half_h = span / 2.0 + active_radius + pad;
+    let mut pixels = vec![0; width * height];
+    rounded_rect(
+        &mut pixels,
+        width,
+        (cx, cy),
+        (half_w, half_h),
+        half_w.min(half_h),
+        BACKGROUND,
+    );
+    for i in 0..total {
+        let y = cy - span / 2.0 + i as f32 * spacing;
+        let (radius, color) = if row == i + 1 {
+            (active_radius, ACTIVE_DOT)
+        } else {
+            (active_radius * (2.0 / 3.0), INACTIVE_DOT)
+        };
+        rounded_rect(&mut pixels, width, (cx, y), (radius, radius), radius, color);
+    }
+    pixels.into_iter().flat_map(u32::to_ne_bytes).collect()
+}
+
+fn rounded_rect(
+    pixels: &mut [u32],
+    width: usize,
+    (cx, cy): (f32, f32),
+    (half_w, half_h): (f32, f32),
+    radius: f32,
+    color: Color,
+) {
+    let [r, g, b, alpha] = color.as_rgba();
+    for y in
+        (cy - half_h).floor() as usize..((cy + half_h).ceil() as usize).min(pixels.len() / width)
+    {
+        for x in (cx - half_w).floor() as usize..((cx + half_w).ceil() as usize).min(width) {
+            // Rounded rectangle signed distance with a one-pixel antialiasing ramp.
+            let dx = (x as f32 + 0.5 - cx).abs() - (half_w - radius);
+            let dy = (y as f32 + 0.5 - cy).abs() - (half_h - radius);
+            let distance = dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius;
+            let a = (alpha as f32 * (0.5 - distance).clamp(0.0, 1.0)).round() as u8;
+            blend(&mut pixels[y * width + x], Color::rgba(r, g, b, a));
+        }
     }
 }
 
@@ -114,5 +169,53 @@ mod tests {
         assert_eq!(pixel.to_be_bytes(), [128, 120, 50, 10]);
         blend(&mut pixel, Color::rgb(255, 255, 255));
         assert_eq!(pixel, 0xffff_ffff);
+    }
+
+    #[test]
+    fn dots_show_only_the_current_project_rows_and_highlight_the_active_one() {
+        let (width, height) = (56, 768);
+        for (row, total) in [(1, 1), (1, 3), (2, 3), (3, 3), (37, 50)] {
+            let pixels = workspace_dots(row, total, width, height);
+            let mut marks = Vec::new();
+            for (y, line) in pixels.chunks_exact(width * 4).enumerate() {
+                let x = width / 2 * 4;
+                let color = u32::from_ne_bytes(line[x..x + 4].try_into().unwrap());
+                if color == ACTIVE_DOT.0 || color == INACTIVE_DOT.0 {
+                    if marks.last().is_none_or(|(_, end, _)| *end + 1 != y) {
+                        marks.push((y, y, color));
+                    } else if let Some((_, end, _)) = marks.last_mut() {
+                        *end = y;
+                    }
+                }
+            }
+            let expected: Vec<_> = (1..=total)
+                .map(|i| {
+                    if i == row {
+                        ACTIVE_DOT.0
+                    } else {
+                        INACTIVE_DOT.0
+                    }
+                })
+                .collect();
+            assert_eq!(
+                marks.iter().map(|&(_, _, color)| color).collect::<Vec<_>>(),
+                expected
+            );
+            let (start, end, _) = marks[row - 1];
+            assert!(
+                marks
+                    .iter()
+                    .filter(|&&(_, _, color)| color == INACTIVE_DOT.0)
+                    .all(|&(top, bottom, _)| bottom - top < end - start)
+            );
+            if total == 3 {
+                for pair in marks.windows(2) {
+                    let (top, bottom, _) = pair[0];
+                    let (next_top, next_bottom, _) = pair[1];
+                    assert_eq!((next_top + next_bottom - top - bottom) / 2, 48);
+                }
+            }
+            assert_eq!(pixels[..4], [0; 4]);
+        }
     }
 }

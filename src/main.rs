@@ -44,7 +44,7 @@ struct Cli {
 enum Command {
     /// Run the helper in the foreground
     Serve {
-        /// Don't show project-name banners on switches or workspace transfers
+        /// Don't show project banners or workspace dots
         #[arg(long)]
         no_notifications: bool,
         #[arg(long, hide = true)]

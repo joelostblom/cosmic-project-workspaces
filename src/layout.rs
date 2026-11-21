@@ -43,16 +43,11 @@ pub struct Project {
     pub temporary: bool,
 }
 
+#[derive(PartialEq, Eq)]
 pub struct ProjectPosition {
     pub name: String,
     pub row: usize,
     pub total: usize,
-}
-
-impl ProjectPosition {
-    pub fn title(&self) -> String {
-        format!("{} ({}/{})", self.name, self.row, self.total)
-    }
 }
 
 impl Project {
