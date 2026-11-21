@@ -598,9 +598,15 @@ impl Desktop {
             .manager
             .as_ref()
             .context("workspace manager went away")?;
-        let override_layout = match &self.slide {
-            Some(slide) => slide.apply(axis)?,
-            None => None,
+        let (wait_for_slide, override_layout) = match &self.slide {
+            Some(slide) => match slide.apply(axis) {
+                Ok(guard) => (true, guard),
+                Err(error) => {
+                    eprintln!("Using COSMIC's native slide for this switch: {error:#}");
+                    (false, None)
+                }
+            },
+            None => (false, None),
         };
         if override_layout.is_some() {
             thread::sleep(CONFIG_SETTLE);
@@ -616,7 +622,7 @@ impl Desktop {
         self.queue.roundtrip(&mut self.state)?;
         // Serialize experimental moves even when the requested axis already
         // matches. The next shortcut must not flip it during this animation.
-        if self.slide.is_some() {
+        if wait_for_slide {
             thread::sleep(ANIMATION_HOLD);
         }
         drop(override_layout);

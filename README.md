@@ -1,6 +1,6 @@
 # COSMIC Project Workspaces
 
-`cpw` is a keyboard-driven prototype for [COSMIC issue #137](https://github.com/pop-os/cosmic-epoch/issues/137). It groups your existing COSMIC workspaces into project columns **without changing COSMIC itself**.
+`cpw` is a keyboard-driven prototype for [COSMIC issue #137](https://github.com/pop-os/cosmic-epoch/issues/137). It groups your existing COSMIC workspaces into project columns **without modifying COSMIC's source code**.
 
 **Left/right** returns to the last workspace you used in the neighboring project, even if you got there via COSMIC's own shortcuts or overview. **Up/down** moves within the current project. There is no wraparound.
 
@@ -49,17 +49,15 @@ Both automatic and manual assignments quietly group assigned workspaces in COSMI
 
 When you enter a different project, `cpw` shows its name and row (for example, `Personal (2/3)`) in a short COSMIC notification. This works with COSMIC's own controls and when you transfer the active workspace with `move-left` or `move-right`. Moving within a project doesn't show a banner. The notification uses `notify-send` (from `libnotify` on Fedora), stays out of COSMIC's notification history, and respects Do Not Disturb. To disable it, start the helper with `cpw serve --no-notifications`.
 
-COSMIC chooses the slide axis for all switches from its workspace layout setting. By default `cpw` leaves that setting alone.
-
 ### Experimental slide-axis workaround
 
-Stop the old helper and start it with `./target/release/cpw serve --experimental-slide`. Existing shortcuts still work. The helper temporarily changes COSMIC's **global** workspace layout to horizontal for `left`, `right`, and `go`, or to vertical for `up` and `down`, then restores the original setting. It only writes when the requested axis differs, and requires an existing user layout setting written by COSMIC Settings.
+The slide workaround is **on by default**. The helper temporarily changes COSMIC's **global** workspace layout to horizontal for `left`, `right`, and `go`, or to vertical for `up` and `down`, then restores the original setting. It only writes when the requested axis differs. If it can't read or temporarily override your layout, it falls back to COSMIC's native slide behavior. Select a workspace layout in COSMIC Settings if you haven't saved one yet.
 
-This flag also enables experimental horizontal slides for `move-left` and `move-right`. COSMIC doesn't animate a reorder by itself, so `cpw` uses an existing workspace as the outgoing view and returns to the moved workspace in the same Wayland transaction. You may see that neighboring workspace briefly during the slide, but the moved workspace is still active afterward. If there's no suitable workspace on the needed side, the move still works without a slide.
+The workaround also enables horizontal slides for `move-left` and `move-right`. COSMIC doesn't animate a reorder by itself, so `cpw` uses an existing workspace as the outgoing view and returns to the moved workspace in the same Wayland transaction. You may see that neighboring workspace briefly during the slide, but the moved workspace is still active afterward. If there's no suitable workspace on the needed side, the move still works without a slide.
 
 There is no compositor acknowledgement: the helper gives the setting 60 ms to take effect and waits 230 ms after switching before processing another move. COSMIC still chooses the slide's direction from its flat workspace order; use `cpw sync-order` if a project comes in from the wrong side. Other COSMIC controls can see the temporary layout. Avoid changing workspace settings during a switch.
 
-Ctrl+C lets the helper finish restoring the setting. If it is forcibly killed mid-switch, use COSMIC Settings → Desktop → Workspaces to reselect your preferred layout. Stop and start plain `cpw serve` to go back to the normal behavior.
+Ctrl+C lets the helper finish restoring the setting. If it is forcibly killed mid-switch, use COSMIC Settings → Desktop → Workspaces to reselect your preferred layout. To disable the workaround, start the helper with `./target/release/cpw serve --no-experimental-slide`. Your shortcuts and project banners still work; `cpw` leaves the slide axis alone and transfers don't play a slide.
 
 ## Shortcuts and pinning
 

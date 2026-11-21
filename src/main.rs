@@ -48,8 +48,10 @@ enum Command {
         /// Don't show project-name banners on switches or workspace transfers
         #[arg(long)]
         no_notifications: bool,
-        /// Temporarily toggle COSMIC's global slide axis for each cpw move
+        /// Keep COSMIC's native slide behavior instead of the default workaround
         #[arg(long)]
+        no_experimental_slide: bool,
+        #[arg(long, hide = true, conflicts_with = "no_experimental_slide")]
         experimental_slide: bool,
         /// Project for workspaces that haven't been assigned
         #[arg(long, default_value = "Work", value_name = "NAME")]
@@ -106,13 +108,14 @@ fn main() -> Result<()> {
     match command {
         Command::Serve {
             no_notifications,
-            experimental_slide,
+            no_experimental_slide,
             default_project,
             projects,
+            ..
         } => serve(
             runtime,
             no_notifications,
-            experimental_slide,
+            !no_experimental_slide,
             default_project,
             projects,
         ),
@@ -146,17 +149,20 @@ fn serve(
     layout.keep_named(&default_project);
     let stopping = Arc::new(AtomicBool::new(false));
     let slide = if experimental_slide {
-        let slide = SlideExperiment::new(&config_home()?)?;
+        SlideExperiment::new(&config_home()?)
+            .inspect_err(|error| eprintln!("Using COSMIC's native slides: {error:#}"))
+            .ok()
+    } else {
+        None
+    };
+    if slide.is_some() {
         for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
             signal_hook::flag::register(signal, Arc::clone(&stopping))?;
         }
         eprintln!(
             "Experimental slide enabled: cpw will temporarily change COSMIC's workspace layout."
         );
-        Some(slide)
-    } else {
-        None
-    };
+    }
     let mut desktop = Desktop::connect(layout, slide, default_project)?;
     file.save(desktop.snapshot())?;
     let notifier = if no_notifications {
