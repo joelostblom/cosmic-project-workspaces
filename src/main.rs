@@ -51,6 +51,9 @@ enum Command {
         /// Temporarily toggle COSMIC's global slide axis for each cpw move
         #[arg(long)]
         experimental_slide: bool,
+        /// Project for workspaces that haven't been assigned
+        #[arg(long, default_value = "Work", value_name = "NAME")]
+        default_project: String,
     },
     /// List project columns, their rows, and the active workspace
     Status {
@@ -71,9 +74,9 @@ enum Command {
         #[arg(long)]
         top: bool,
     },
-    /// Remove the active workspace from its project without closing it
+    /// Return the active workspace to the default project
     Unassign,
-    /// Remove a project and its assignments without closing its workspaces
+    /// Remove a project and return its workspaces to the default project
     Forget { project: String },
     /// Return to the last-used workspace in a named project
     Go { project: String },
@@ -95,7 +98,13 @@ fn main() -> Result<()> {
         Command::Serve {
             no_notifications,
             experimental_slide,
-        } => serve(runtime, no_notifications, experimental_slide),
+            default_project,
+        } => serve(
+            runtime,
+            no_notifications,
+            experimental_slide,
+            default_project,
+        ),
         other => {
             let stream = UnixStream::connect(socket_path(runtime))
                 .context("could not contact the helper; start it with `cpw serve`")?;
@@ -109,7 +118,13 @@ fn main() -> Result<()> {
     }
 }
 
-fn serve(runtime: &Path, no_notifications: bool, experimental_slide: bool) -> Result<()> {
+fn serve(
+    runtime: &Path,
+    no_notifications: bool,
+    experimental_slide: bool,
+    default_project: String,
+) -> Result<()> {
+    layout::validate_name(&default_project).context("invalid --default-project")?;
     let socket = CommandSocket::bind(runtime)?;
     let (mut file, layout) = StateFile::load()?;
     let stopping = Arc::new(AtomicBool::new(false));
@@ -125,7 +140,7 @@ fn serve(runtime: &Path, no_notifications: bool, experimental_slide: bool) -> Re
     } else {
         None
     };
-    let mut desktop = Desktop::connect(layout, slide)?;
+    let mut desktop = Desktop::connect(layout, slide, default_project)?;
     file.save(desktop.snapshot())?;
     let notifier = if no_notifications {
         None

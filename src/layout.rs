@@ -148,25 +148,39 @@ impl Layout {
     pub fn assign(&mut self, key: Key, name: String, top: bool) -> Result<()> {
         validate_name(&name)?;
         self.detach(&key);
-        let index = self
-            .projects
-            .iter()
-            .position(|project| project.name == name);
-        let project = if let Some(index) = index {
-            &mut self.projects[index]
-        } else {
-            self.projects.push(Project {
-                name,
-                members: Vec::new(),
-                last: None,
-            });
-            self.projects.last_mut().unwrap()
-        };
+        let project = self.get_or_create_project(&name);
         let row = if top { 0 } else { project.members.len() };
         project.members.insert(row, key.clone());
         project.last = Some(key);
         self.drop_empty();
         Ok(())
+    }
+
+    pub fn assign_missing(&mut self, name: &str, keys: Vec<Key>) -> bool {
+        let missing: Vec<_> = keys.into_iter().filter(|key| !self.contains(key)).collect();
+        if missing.is_empty() {
+            return false;
+        }
+        // Discovering workspaces is not the same as visiting them.
+        self.get_or_create_project(name).members.extend(missing);
+        true
+    }
+
+    fn get_or_create_project(&mut self, name: &str) -> &mut Project {
+        let index = self
+            .projects
+            .iter()
+            .position(|project| project.name == name);
+        if let Some(index) = index {
+            &mut self.projects[index]
+        } else {
+            self.projects.push(Project {
+                name: name.to_owned(),
+                members: Vec::new(),
+                last: None,
+            });
+            self.projects.last_mut().unwrap()
+        }
     }
 
     fn detach(&mut self, key: &Key) -> bool {
@@ -273,7 +287,7 @@ impl Layout {
     }
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub fn validate_name(name: &str) -> Result<()> {
     ensure!(
         !name.is_empty()
             && name == name.trim()
@@ -290,6 +304,28 @@ mod tests {
 
     fn stable(id: &str) -> Key {
         Key::Stable(id.to_owned())
+    }
+
+    #[test]
+    fn default_assignment_preserves_explicit_projects_and_last_used() {
+        let mut layout = Layout::default();
+        let work = stable("work");
+        let personal = stable("personal");
+        let other = Key::Session(1);
+        let another = Key::Session(2);
+        layout.assign(work.clone(), "Work".into(), false).unwrap();
+        layout
+            .assign(personal.clone(), "Personal".into(), false)
+            .unwrap();
+        assert!(layout.assign_missing(
+            "Work",
+            vec![personal.clone(), other.clone(), another.clone()]
+        ));
+        assert_eq!(layout.projects[0].members, [work.clone(), other, another]);
+        assert_eq!(layout.project_name(&personal), Some("Personal"));
+        assert_eq!(layout.go("Work", |_| true).unwrap(), &work);
+        assert!(!layout.assign_missing("Other", vec![work, personal]));
+        assert_eq!(layout.projects.len(), 2);
     }
 
     #[test]

@@ -14,13 +14,9 @@ In one terminal, leave the helper running:
 ./target/release/cpw serve
 ```
 
-On the workspace you want to assign, open a terminal in the project directory and run:
+Workspaces without a project are automatically assigned to **Work**, including new workspaces you start using through COSMIC itself. The empty trailing workspace is kept free for any project to borrow. To use a different default, start the helper with `./target/release/cpw serve --default-project "My project"`. This doesn't move any workspaces that already have an assignment.
 
-```sh
-./target/release/cpw assign Work
-```
-
-Repeat on another workspace with a different project name. Assign a third workspace to either project to try vertical navigation:
+On the workspace you want to move out of the default project, open a terminal in the project directory and assign it:
 
 ```sh
 ./target/release/cpw assign Personal
@@ -31,13 +27,13 @@ Repeat on another workspace with a different project name. Assign a third worksp
 ./target/release/cpw right
 ```
 
-New projects appear on the right; new rows go at the bottom unless you pass `--top`. `cpw go PROJECT` enters a project by name, including when the active workspace isn't assigned. Unavailable workspaces are skipped; if a project's last-used workspace is unavailable, entry falls back to its top available row. `cpw unassign` removes just the active workspace from the layout. `cpw forget PROJECT` removes a whole column. Neither command closes or unpins any workspaces.
+New projects appear on the right; new rows go at the bottom unless you pass `--top`. `cpw go PROJECT` enters a project by name, including from the empty spare. Unavailable workspaces are skipped; if a project's last-used workspace is unavailable, entry falls back to its top available row. `cpw unassign` returns the active workspace to the default project (or frees it if it's the empty trailing workspace). `cpw forget PROJECT` removes a non-default column and returns its available workspaces to the default. Neither command closes or unpins any workspaces.
 
 Press **Down** on a project's bottom row or **Up** on its top row to borrow COSMIC's trailing empty workspace without pinning it. For **Up**, `cpw` moves the spare above the current row and activates it in one transaction so COSMIC can slide upward. For **Down**, the spare stays at the end for the slide; `cpw` syncs it into the project block when COSMIC supplies a fresh spare. Open a window on the new row before growing that edge again. If you leave the row empty, COSMIC can remove it or the helper can return it to the spare pool.
 
 ### Keep COSMIC order in sync
 
-Each `assign` also quietly groups assigned workspaces in COSMIC's own list, in project order and then top to bottom. The block starts at the first assigned workspace. Unassigned workspaces keep their relative order and the unassigned spare stays at the end. COSMIC's workspace numbers and its native next/previous traversal can change; the active workspace and its windows stay together.
+Both automatic and manual assignments quietly group assigned workspaces in COSMIC's own list, in project order and then top to bottom. The block starts at the first assigned workspace. The unassigned spare stays at the end. COSMIC's workspace numbers and its native next/previous traversal can change; the active workspace and its windows stay together.
 
 `cpw status --grid` shows the project columns side by side, with the active workspace in brackets. `cpw sync-order --dry-run` previews a reorder without making changes. Run `cpw sync-order` to apply it to an existing layout or repair drift after manually dragging workspaces in COSMIC or starting a new login session. Switching projects doesn't trigger a reorder.
 

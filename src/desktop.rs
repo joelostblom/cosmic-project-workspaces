@@ -48,7 +48,11 @@ pub struct Desktop {
 }
 
 impl Desktop {
-    pub fn connect(layout: Layout, slide: Option<SlideExperiment>) -> Result<Self> {
+    pub fn connect(
+        layout: Layout,
+        slide: Option<SlideExperiment>,
+        default_project: String,
+    ) -> Result<Self> {
         let conn = Connection::connect_to_env().context("connect to the COSMIC Wayland session")?;
         let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
         let manager = globals
@@ -59,6 +63,7 @@ impl Desktop {
             manager: Some(manager),
             cosmic_manager,
             layout,
+            default_project,
             occupancy: Occupancy::bind(&globals, &queue.handle()),
             ..Default::default()
         };
@@ -68,12 +73,14 @@ impl Desktop {
             state.ready,
             "the compositor did not send a workspace snapshot"
         );
-        Ok(Self {
+        let mut desktop = Self {
             conn,
             queue,
             state,
             slide,
-        })
+        };
+        desktop.maintain_layout();
+        Ok(desktop)
     }
 
     pub fn snapshot(&self) -> SavedLayout {
@@ -85,7 +92,7 @@ impl Desktop {
     }
 
     pub fn wait(&mut self, listener: &UnixListener) -> Result<bool> {
-        self.maintain_growth();
+        self.maintain_layout();
         let Some(guard) = self.queue.prepare_read() else {
             self.queue.dispatch_pending(&mut self.state)?;
             self.state.ensure_online()?;
@@ -141,7 +148,7 @@ impl Desktop {
         // Read everything the compositor has sent before interpreting a shortcut.
         self.queue.roundtrip(&mut self.state)?;
         self.state.ensure_online()?;
-        self.maintain_growth();
+        self.maintain_layout();
         match command {
             Command::Serve { .. } => bail!("the helper is already running"),
             Command::Status { grid } => Ok(self.state.status(grid)),
@@ -179,16 +186,34 @@ impl Desktop {
             }
             Command::Unassign => {
                 let workspace = self.state.current()?;
-                let (key, name) = (workspace.key(), workspace.label());
+                let (key, name, id) = (workspace.key(), workspace.label(), workspace.handle.id());
+                if self.state.layout.project_name(&key) == Some(self.state.default_project.as_str())
+                    && self.state.default_candidates().contains(&key)
+                {
+                    return Ok(format!("{name} is already in the default project."));
+                }
                 ensure!(self.state.layout.unassign(&key), "{name} is not assigned");
+                if let Some(workspace) = self.state.workspaces.get_mut(&id) {
+                    workspace.extension = None;
+                }
+                self.maintain_layout();
                 self.state.observe_active();
-                Ok(format!("Unassigned {name}."))
+                Ok(match self.state.layout.project_name(&key) {
+                    Some(project) => format!("Returned the active workspace to {project}."),
+                    None => format!("Released {name} as the spare."),
+                })
             }
             Command::Forget { project } => {
+                ensure!(
+                    project != self.state.default_project,
+                    "can't forget the default project; select a different one with `serve --default-project NAME`"
+                );
                 self.state.layout.forget(&project)?;
+                self.maintain_layout();
                 self.state.observe_active();
                 Ok(format!(
-                    "Removed project {project}; COSMIC workspaces are unchanged."
+                    "Removed project {project}. Its available workspaces now use the default project ({}).",
+                    self.state.default_project
                 ))
             }
             Command::Go { project } => {
@@ -263,10 +288,7 @@ impl Desktop {
             .to_owned();
         let ordered = self.state.ordered_workspaces()?;
         let Some(spare) = ordered.last().filter(|w| {
-            !w.active()
-                && w.id.is_none()
-                && !self.state.layout.contains(&w.key())
-                && !self.state.occupancy.has_window(&w.handle.id())
+            !w.active() && self.state.dynamic_empty(w) && !self.state.layout.contains(&w.key())
         }) else {
             return Ok("No empty trailing workspace is available yet.".into());
         };
@@ -305,11 +327,17 @@ impl Desktop {
         Ok(format!("Opened {label} as a new {row} in {project}."))
     }
 
-    fn maintain_growth(&mut self) {
-        if self.state.refresh_extensions(Instant::now())
+    fn maintain_layout(&mut self) {
+        let extended = self.state.refresh_extensions(Instant::now());
+        // Window membership can change without a workspace Done event.
+        if self.state.assign_defaults() {
+            self.state.observe_active();
+        }
+        let assigned = std::mem::take(&mut self.state.default_order_changed);
+        if (extended || assigned)
             && let Err(error) = self.sync_order(false)
         {
-            eprintln!("Could not sync the new project row: {error:#}");
+            eprintln!("Could not sync automatic workspace assignments: {error:#}");
         }
     }
 
@@ -494,6 +522,8 @@ struct State {
     workspaces: HashMap<ObjectId, Workspace>,
     next_serial: u64,
     layout: Layout,
+    default_project: String,
+    default_order_changed: bool,
     project_changes: ProjectChanges,
     occupancy: Occupancy,
 }
@@ -585,6 +615,38 @@ impl State {
         Ok(workspaces)
     }
 
+    fn dynamic_empty(&self, workspace: &Workspace) -> bool {
+        workspace.id.is_none() && !self.occupancy.has_window(&workspace.handle.id())
+    }
+
+    fn default_candidates(&self) -> Vec<Key> {
+        if self.groups.len() != 1 {
+            return Vec::new();
+        }
+        let Ok(ordered) = self.ordered_workspaces() else {
+            return Vec::new();
+        };
+        let Some((tail, preceding)) = ordered.split_last() else {
+            return Vec::new();
+        };
+        // Leave COSMIC's one empty trailing workspace free to grow any column.
+        preceding
+            .iter()
+            .copied()
+            .chain((!self.dynamic_empty(tail)).then_some(*tail))
+            .map(Workspace::key)
+            .collect()
+    }
+
+    fn assign_defaults(&mut self) -> bool {
+        let candidates = self.default_candidates();
+        let assigned = self
+            .layout
+            .assign_missing(&self.default_project, candidates);
+        self.default_order_changed |= assigned;
+        assigned
+    }
+
     fn has_loan_deadline(&self) -> bool {
         self.workspaces.values().any(|w| {
             w.extension
@@ -658,13 +720,14 @@ impl State {
 
     fn status(&self, grid: bool) -> String {
         let mut text = String::new();
+        writeln!(text, "Default project: {}", self.default_project).unwrap();
         if let Err(error) = self.current() {
             writeln!(text, "Navigation unavailable: {error}").unwrap();
         }
         if self.layout.projects.is_empty() {
             writeln!(
                 text,
-                "No projects yet. Run `cpw assign PROJECT` on the active workspace."
+                "Open a window to start the default project, or run `cpw assign PROJECT`."
             )
             .unwrap();
         }
@@ -693,9 +756,19 @@ impl State {
                 }
             }
         }
+        let spare = self
+            .ordered_workspaces()
+            .ok()
+            .and_then(|workspaces| workspaces.last().copied())
+            .filter(|w| {
+                self.groups.len() == 1 && self.dynamic_empty(w) && !self.layout.contains(&w.key())
+            });
         let mut unassigned: Vec<_> = self
             .visible()
-            .filter(|w| !self.layout.contains(&w.key()))
+            .filter(|w| {
+                !self.layout.contains(&w.key())
+                    && spare.is_none_or(|spare| spare.serial != w.serial)
+            })
             .collect();
         unassigned.sort_by_key(|w| (w.coordinate, w.serial));
         if !unassigned.is_empty() {
@@ -704,6 +777,10 @@ impl State {
                 let active = if w.active() { " [active]" } else { "" };
                 writeln!(text, "   {}{active}", w.label()).unwrap();
             }
+        }
+        if let Some(spare) = spare {
+            let active = if spare.active() { " [active]" } else { "" };
+            writeln!(text, "Spare: {}{active}", spare.label()).unwrap();
         }
         text.trim_end().to_owned()
     }
@@ -809,6 +886,7 @@ impl Dispatch<ExtWorkspaceManagerV1, ()> for State {
             }
             manager::Event::Done => {
                 state.ready = true;
+                state.assign_defaults();
                 state.observe_active();
             }
             manager::Event::Finished => state.manager = None,
