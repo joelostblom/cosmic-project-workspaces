@@ -45,7 +45,7 @@ struct Cli {
 enum Command {
     /// Run the helper in the foreground
     Serve {
-        /// Don't show project-name banners when switching projects
+        /// Don't show project-name banners on switches or workspace transfers
         #[arg(long)]
         no_notifications: bool,
         /// Temporarily toggle COSMIC's global slide axis for each cpw move

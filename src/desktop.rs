@@ -306,6 +306,11 @@ impl Desktop {
         } else {
             ""
         };
+        if movement.is_some()
+            && let Some(workspace) = workspace.filter(|workspace| workspace.active())
+        {
+            self.state.project_changes.announce_move(workspace.serial);
+        }
         let verb = if movement.is_some() {
             "Moved"
         } else {

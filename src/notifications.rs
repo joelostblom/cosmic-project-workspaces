@@ -41,6 +41,16 @@ impl ProjectChanges {
     pub fn take(&mut self) -> Option<String> {
         self.pending.take()
     }
+
+    pub fn announce_move(&mut self, workspace: u64) {
+        // Explicit transfers enter a different project without changing the
+        // active workspace. Other assignment edits should still be quiet.
+        if let Some((active, Some(position))) = &self.active
+            && *active == workspace
+        {
+            self.pending = Some(position.title());
+        }
+    }
 }
 
 pub struct Notifier(Sender<String>);
@@ -159,6 +169,19 @@ mod tests {
         assert_eq!(changes.take().as_deref(), Some("Hobby (2/2)"));
         changes.observe(at(2, "Personal", 1, 1));
         changes.observe(Some((4, None)));
+        assert_eq!(changes.take(), None);
+    }
+
+    #[test]
+    fn a_transfer_announces_the_destination_without_switching_workspaces() {
+        let mut changes = ProjectChanges::default();
+        changes.observe(at(1, "Work", 1, 1));
+        changes.observe(at(1, "Personal", 2, 3));
+        assert_eq!(changes.take(), None);
+        changes.announce_move(2);
+        assert_eq!(changes.take(), None);
+        changes.announce_move(1);
+        assert_eq!(changes.take().as_deref(), Some("Personal (2/3)"));
         assert_eq!(changes.take(), None);
     }
 }
