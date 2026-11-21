@@ -40,31 +40,33 @@ pub struct Notifier(Sender<String>);
 impl Notifier {
     pub fn start() -> io::Result<Self> {
         let (tx, rx) = mpsc::channel::<String>();
-        thread::Builder::new().name("project-notifications".into()).spawn(move || {
-            let mut previous: Option<(u32, Instant)> = None;
-            let mut reported_error = false;
-            while let Ok(project) = rx.recv() {
-                // Keep switching responsive if the notification server is slow.
-                let project = rx.try_iter().last().unwrap_or(project);
-                let replacement =
-                    previous.filter(|(_, started)| started.elapsed() < Duration::from_secs(1));
-                let now = Instant::now();
-                match notify(&project, replacement.map(|(id, _)| id)) {
-                    Ok(id) => {
-                        let started = replacement.map_or(now, |(_, started)| started);
-                        previous = id.map(|id| (id, started));
-                        reported_error = false;
-                    }
-                    Err(error) => {
-                        previous = None;
-                        if !reported_error {
-                            eprintln!("Project notifications unavailable: {error:#}");
-                            reported_error = true;
+        thread::Builder::new()
+            .name("project-notifications".into())
+            .spawn(move || {
+                let mut previous: Option<(u32, Instant)> = None;
+                let mut reported_error = false;
+                while let Ok(project) = rx.recv() {
+                    // Keep switching responsive if the notification server is slow.
+                    let project = rx.try_iter().last().unwrap_or(project);
+                    let replacement =
+                        previous.filter(|(_, started)| started.elapsed() < Duration::from_secs(1));
+                    let now = Instant::now();
+                    match notify(&project, replacement.map(|(id, _)| id)) {
+                        Ok(id) => {
+                            let started = replacement.map_or(now, |(_, started)| started);
+                            previous = id.map(|id| (id, started));
+                            reported_error = false;
+                        }
+                        Err(error) => {
+                            previous = None;
+                            if !reported_error {
+                                eprintln!("Project notifications unavailable: {error:#}");
+                                reported_error = true;
+                            }
                         }
                     }
                 }
-            }
-        })?;
+            })?;
         Ok(Self(tx))
     }
 
