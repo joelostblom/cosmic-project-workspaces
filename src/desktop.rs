@@ -1,10 +1,11 @@
 mod occupancy;
+mod overlay;
 
 use crate::{
     Command,
     layout::{Direction, Key, Layout, SavedLayout, Side},
-    notifications::ProjectChanges,
     order::OrderPlan,
+    project_changes::ProjectChanges,
     slide::{ANIMATION_HOLD, CONFIG_SETTLE, SlideAxis, SlideExperiment},
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -13,6 +14,7 @@ use cosmic_protocols::workspace::v2::client::{
     zcosmic_workspace_manager_v2::ZcosmicWorkspaceManagerV2,
 };
 use occupancy::Occupancy;
+use overlay::Overlay;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use std::{
     collections::{HashMap, HashSet},
@@ -59,6 +61,7 @@ impl Desktop {
         layout: Layout,
         slide: Option<SlideExperiment>,
         default_project: String,
+        enable_overlay: bool,
     ) -> Result<Self> {
         let conn = Connection::connect_to_env().context("connect to the COSMIC Wayland session")?;
         let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
@@ -66,12 +69,20 @@ impl Desktop {
             .bind(&queue.handle(), 1..=1, ())
             .context("this session does not expose ext_workspace_manager_v1")?;
         let cosmic_manager = globals.bind(&queue.handle(), 2..=2, ()).ok();
+        let overlay = enable_overlay
+            .then(|| {
+                Overlay::bind(&globals, &queue.handle())
+                    .inspect_err(|error| eprintln!("Project overlay unavailable: {error:#}"))
+                    .ok()
+            })
+            .flatten();
         let mut state = State {
             manager: Some(manager),
             cosmic_manager,
             layout,
             default_project,
             occupancy: Occupancy::bind(&globals, &queue.handle()),
+            overlay,
             ..Default::default()
         };
         queue.roundtrip(&mut state)?;
@@ -94,12 +105,49 @@ impl Desktop {
         self.state.layout.snapshot()
     }
 
-    pub fn take_project_notification(&mut self) -> Option<String> {
-        self.state.project_changes.take()
+    fn update_overlay(&mut self) -> Option<Duration> {
+        let title = self.state.project_changes.take();
+        let overlay = self.state.overlay.as_mut()?;
+        if let Some(title) = title
+            && let Err(error) = overlay.show(&title, &self.queue.handle())
+        {
+            eprintln!("Could not show the project overlay: {error:#}");
+        }
+        let now = Instant::now();
+        overlay.expire(now);
+        overlay.time_remaining(now)
     }
 
     pub fn wait(&mut self, listener: &UnixListener) -> Result<bool> {
         self.maintain_layout();
+        let overlay_timeout = self.update_overlay();
+        // Wake even if neither connection receives events.
+        let maintenance_timeout = (self.slide.is_some() || self.state.has_loan_deadline())
+            .then_some(Duration::from_millis(100));
+        let timeout = overlay_timeout.into_iter().chain(maintenance_timeout).min();
+        self.poll_wayland(Some(listener), timeout)
+    }
+
+    fn hold_slide(&mut self) -> Result<()> {
+        // Keep the axis stable for the compositor's animation, but continue
+        // sending overlay requests and handling configure events immediately.
+        let deadline = Instant::now() + ANIMATION_HOLD;
+        loop {
+            let overlay_timeout = self.update_overlay();
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(());
+            }
+            let timeout = overlay_timeout.map_or(remaining, |timeout| timeout.min(remaining));
+            self.poll_wayland(None, Some(timeout))?;
+        }
+    }
+
+    fn poll_wayland(
+        &mut self,
+        listener: Option<&UnixListener>,
+        timeout: Option<Duration>,
+    ) -> Result<bool> {
         let Some(guard) = self.queue.prepare_read() else {
             self.queue.dispatch_pending(&mut self.state)?;
             self.state.ensure_online()?;
@@ -113,17 +161,14 @@ impl Desktop {
             }
             result => result?,
         }
-        let mut fds = [
-            PollFd::from_borrowed_fd(guard.connection_fd(), interest),
-            PollFd::new(listener, PollFlags::IN),
-        ];
-        // Wake periodically to release a loan or handle a termination signal,
-        // even if neither connection receives events.
-        let timeout =
-            (self.slide.is_some() || self.state.has_loan_deadline()).then_some(Timespec {
-                tv_sec: 0,
-                tv_nsec: 100_000_000,
-            });
+        let mut fds = vec![PollFd::from_borrowed_fd(guard.connection_fd(), interest)];
+        if let Some(listener) = listener {
+            fds.push(PollFd::new(listener, PollFlags::IN));
+        }
+        let timeout = timeout.map(|duration| Timespec {
+            tv_sec: duration.as_secs() as i64,
+            tv_nsec: duration.subsec_nanos().into(),
+        });
         match poll(&mut fds, timeout.as_ref()) {
             Err(rustix::io::Errno::INTR) => return Ok(false),
             result => {
@@ -131,7 +176,7 @@ impl Desktop {
             }
         }
         let wayland = fds[0].revents();
-        let command = fds[1].revents();
+        let command = fds.get(1).map_or(PollFlags::empty(), PollFd::revents);
         if wayland.intersects(PollFlags::IN | PollFlags::ERR | PollFlags::HUP) {
             match guard.read() {
                 Err(WaylandError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {}
@@ -288,6 +333,15 @@ impl Desktop {
             workspace.extension = None;
         }
         self.state.observe_active();
+        if movement.is_some()
+            && let Some(workspace) = self
+                .state
+                .workspaces
+                .get(id)
+                .filter(|workspace| workspace.active())
+        {
+            self.state.project_changes.announce_move(workspace.serial);
+        }
         let animation = movement.map(|(side, source)| MoveSlide {
             active: id,
             side,
@@ -306,11 +360,6 @@ impl Desktop {
         } else {
             ""
         };
-        if movement.is_some()
-            && let Some(workspace) = workspace.filter(|workspace| workspace.active())
-        {
-            self.state.project_changes.announce_move(workspace.serial);
-        }
         let verb = if movement.is_some() {
             "Moved"
         } else {
@@ -540,7 +589,7 @@ impl Desktop {
             // The transient activation mustn't change project history or
             // emit a project-switch notification.
             self.state.observe_active();
-            thread::sleep(ANIMATION_HOLD);
+            self.hold_slide()?;
             drop(override_layout);
             ensure!(
                 self.state
@@ -623,7 +672,7 @@ impl Desktop {
         // Serialize experimental moves even when the requested axis already
         // matches. The next shortcut must not flip it during this animation.
         if wait_for_slide {
-            thread::sleep(ANIMATION_HOLD);
+            self.hold_slide()?;
         }
         drop(override_layout);
         let current = self
@@ -659,6 +708,7 @@ struct State {
     project_changes: ProjectChanges,
     defer_active_observation: bool,
     occupancy: Occupancy,
+    overlay: Option<Overlay>,
 }
 
 struct Workspace {

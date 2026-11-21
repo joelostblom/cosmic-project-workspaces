@@ -1,14 +1,13 @@
 mod desktop;
 mod layout;
-mod notifications;
 mod order;
+mod project_changes;
 mod slide;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use desktop::Desktop;
 use layout::{Layout, SavedLayout};
-use notifications::Notifier;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use slide::SlideExperiment;
 use std::{
@@ -48,6 +47,8 @@ enum Command {
         /// Don't show project-name banners on switches or workspace transfers
         #[arg(long)]
         no_notifications: bool,
+        #[arg(long, hide = true)]
+        overlay: bool,
         /// Keep COSMIC's native slide behavior instead of the default workaround
         #[arg(long)]
         no_experimental_slide: bool,
@@ -159,15 +160,8 @@ fn serve(
             "Experimental slide enabled: cpw will temporarily change COSMIC's workspace layout."
         );
     }
-    let mut desktop = Desktop::connect(layout, slide, default_project)?;
+    let mut desktop = Desktop::connect(layout, slide, default_project, !no_notifications)?;
     file.save(desktop.snapshot())?;
-    let notifier = if no_notifications {
-        None
-    } else {
-        Notifier::start()
-            .inspect_err(|error| eprintln!("Project notifications unavailable: {error}"))
-            .ok()
-    };
     println!("Project workspace helper is ready. Ctrl+C to stop.");
     while !stopping.load(Ordering::Relaxed) {
         let accept_command = desktop.wait(&socket.listener)?;
@@ -180,9 +174,6 @@ fn serve(
             if let Err(error) = serve_client(stream, &mut desktop, &mut file) {
                 eprintln!("Command connection: {error:#}");
             }
-        }
-        if let (Some(project), Some(notifier)) = (desktop.take_project_notification(), &notifier) {
-            notifier.show(project);
         }
     }
     Ok(())

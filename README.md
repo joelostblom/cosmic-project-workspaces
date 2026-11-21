@@ -47,7 +47,7 @@ Both automatic and manual assignments quietly group assigned workspaces in COSMI
 
 ## Banners and animation
 
-When you enter a different project, `cpw` shows its name and row (for example, `Personal (2/3)`) in a short COSMIC notification. This works with COSMIC's own controls and when you transfer the active workspace with `move-left` or `move-right`. Moving within a project doesn't show a banner. The notification uses `notify-send` (from `libnotify` on Fedora), stays out of COSMIC's notification history, and respects Do Not Disturb. To disable it, start the helper with `cpw serve --no-notifications`.
+When you enter a different project, `cpw` shows its name and row (for example, `Personal (2/3)`) in a centered Wayland overlay. This works with COSMIC's own controls and when you transfer the active workspace with `move-left` or `move-right`. Moving within a project doesn't show a banner. The translucent overlay appears during the switch, lasts about one second, updates in place on rapid changes, and doesn't take keyboard or pointer input. It doesn't follow Do Not Disturb. Start the helper with `cpw serve --no-notifications` to turn it off.
 
 ### Experimental slide-axis workaround
 
