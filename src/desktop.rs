@@ -158,7 +158,7 @@ impl Desktop {
         self.maintain_layout();
         match command {
             Command::Serve { .. } => bail!("the helper is already running"),
-            Command::Status { grid } => Ok(self.state.status(grid)),
+            Command::Status => Ok(self.state.status()),
             Command::SyncOrder { dry_run } => self.sync_order(dry_run),
             Command::Assign { project, top } => {
                 let workspace = self.state.current()?;
@@ -895,9 +895,8 @@ impl State {
         self.project_changes.observe(active);
     }
 
-    fn status(&self, grid: bool) -> String {
+    fn status(&self) -> String {
         let mut text = String::new();
-        writeln!(text, "Default project: {}", self.default_project).unwrap();
         if let Err(error) = self.current() {
             writeln!(text, "Navigation unavailable: {error}").unwrap();
         }
@@ -907,39 +906,8 @@ impl State {
                 "Open a window to start the default project, or run `cpw assign PROJECT`."
             )
             .unwrap();
-        }
-        if grid && !self.layout.projects.is_empty() {
-            self.write_grid(&mut text);
         } else {
-            for (column, project) in self.layout.projects.iter().enumerate() {
-                let temporary = if project.temporary {
-                    " [temporary]"
-                } else {
-                    ""
-                };
-                writeln!(text, "{}. {}{temporary}", column + 1, project.name).unwrap();
-                if project.members.is_empty() {
-                    writeln!(text, "   (empty)").unwrap();
-                }
-                for (row, key) in project.members.iter().enumerate() {
-                    let label = match self.find(key) {
-                        Some(w) if w.active() => format!("{} [active]", w.label()),
-                        Some(w) => w.label(),
-                        None => "(unavailable)".into(),
-                    };
-                    let last = if project.last.as_ref() == Some(key) {
-                        " [last used]"
-                    } else {
-                        ""
-                    };
-                    let session = if matches!(key, Key::Session(_)) {
-                        " [session only]"
-                    } else {
-                        ""
-                    };
-                    writeln!(text, "   {}. {label}{last}{session}", row + 1).unwrap();
-                }
-            }
+            self.write_grid(&mut text);
         }
         let spare = self
             .ordered_workspaces()
@@ -957,17 +925,25 @@ impl State {
             .collect();
         unassigned.sort_by_key(|w| (w.coordinate, w.serial));
         if !unassigned.is_empty() {
-            writeln!(text, "Unassigned:").unwrap();
+            writeln!(text, "\nUnassigned:").unwrap();
             for w in unassigned {
-                let active = if w.active() { " [active]" } else { "" };
-                writeln!(text, "   {}{active}", w.label()).unwrap();
+                writeln!(text, "   {}", Self::status_label(w)).unwrap();
             }
         }
-        if let Some(spare) = spare {
-            let active = if spare.active() { " [active]" } else { "" };
-            writeln!(text, "Spare: {}{active}", spare.label()).unwrap();
+        writeln!(text, "\n[ ] active; * last used; ~ session only").unwrap();
+        writeln!(text, "Default project: {}", self.default_project).unwrap();
+        let spare = spare.map_or_else(|| "none".to_owned(), Self::status_label);
+        write!(text, "Spare: {spare}").unwrap();
+        text
+    }
+
+    fn status_label(workspace: &Workspace) -> String {
+        let label = workspace.label();
+        if workspace.active() {
+            format!("[{label}]")
+        } else {
+            label
         }
-        text.trim_end().to_owned()
     }
 
     fn write_grid(&self, text: &mut String) {
@@ -976,15 +952,21 @@ impl State {
             .projects
             .iter()
             .map(|project| {
-                let mut cells: Vec<_> = std::iter::once(project.name.clone())
+                let heading = if project.temporary {
+                    format!("{} (temporary)", project.name)
+                } else {
+                    project.name.clone()
+                };
+                let mut cells: Vec<_> = std::iter::once(heading)
                     .chain(project.members.iter().map(|key| {
-                        let mut label = match self.find(key) {
-                            Some(w) if w.active() => format!("[{}]", w.label()),
-                            Some(w) => w.label(),
-                            None => "(unavailable)".into(),
-                        };
+                        let mut label = self
+                            .find(key)
+                            .map_or_else(|| "(unavailable)".into(), Self::status_label);
                         if project.last.as_ref() == Some(key) {
                             label.push_str(" *");
+                        }
+                        if matches!(key, Key::Session(_)) {
+                            label.push_str(" ~");
                         }
                         label
                     }))
@@ -992,30 +974,56 @@ impl State {
                 if project.members.is_empty() {
                     cells.push("(empty)".into());
                 }
-                let width = cells.iter().map(|cell| cell.width()).max().unwrap_or(0);
-                (cells, width)
+                cells
             })
             .collect();
-        let height = columns
-            .iter()
-            .map(|(cells, _)| cells.len())
-            .max()
-            .unwrap_or(0);
-        for row in 0..height {
-            for (column, (cells, width)) in columns.iter().enumerate() {
-                if column > 0 {
-                    text.push_str(" | ");
+        write_status_columns(text, &columns);
+    }
+}
+
+fn write_status_columns(text: &mut String, columns: &[Vec<String>]) {
+    const SEPARATOR: &str = " │ ";
+    let widths: Vec<_> = columns
+        .iter()
+        .map(|cells| cells.iter().map(|cell| cell.width()).max().unwrap_or(0))
+        .collect();
+    let height = columns.iter().map(Vec::len).max().unwrap_or(0);
+    for row in 0..height {
+        let mut line = String::new();
+        for (index, (cells, width)) in columns.iter().zip(&widths).enumerate() {
+            if index > 0 {
+                line.push_str(SEPARATOR);
+            }
+            let cell = cells.get(row).map_or("", String::as_str);
+            line.push_str(cell);
+            line.extend(std::iter::repeat_n(' ', width - cell.width()));
+        }
+        writeln!(text, "{}", line.trim_end()).unwrap();
+        if row == 0 {
+            for (index, width) in widths.iter().enumerate() {
+                if index > 0 {
+                    text.push_str("-|-");
                 }
-                let cell = cells.get(row).map_or("", String::as_str);
-                text.push_str(cell);
-                if column + 1 < columns.len() {
-                    text.extend(std::iter::repeat_n(' ', width - cell.width()));
-                }
+                text.extend(std::iter::repeat_n('-', *width));
             }
             text.push('\n');
         }
-        writeln!(text, "[ ] active; * last used").unwrap();
     }
+}
+
+#[cfg(test)]
+#[test]
+fn status_grid_separates_headings_and_aligns_wide_names() {
+    let columns = [
+        vec!["仕事".into(), "[1] *".into(), "2".into()],
+        vec!["Personal".into(), "(empty)".into()],
+    ];
+    let mut grid = String::new();
+    write_status_columns(&mut grid, &columns);
+    assert_eq!(
+        grid,
+        "仕事  │ Personal\n------|---------\n[1] * │ (empty)\n2     │\n"
+    );
 }
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {

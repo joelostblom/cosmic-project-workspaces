@@ -60,12 +60,8 @@ enum Command {
         #[arg(long = "project", value_name = "NAME")]
         projects: Vec<String>,
     },
-    /// List project columns, their rows, and the active workspace
-    Status {
-        /// Show labeled project columns side by side
-        #[arg(long)]
-        grid: bool,
-    },
+    /// Show the project grid, active workspace, and spare
+    Status,
     /// Match COSMIC's workspace order to the project columns
     SyncOrder {
         /// Show the proposed order without changing COSMIC

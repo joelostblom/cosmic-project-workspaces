@@ -32,7 +32,7 @@ Named columns stay visible even if they have no workspaces. No extra COSMIC work
 
 ```sh
 ./target/release/cpw assign Personal
-./target/release/cpw status --grid
+./target/release/cpw status
 ```
 
 With `assign`, new projects appear on the right; new rows go at the bottom unless you pass `--top`. `cpw go PROJECT` enters a project by name, including from the empty spare. Unavailable workspaces are skipped; if a project's last-used workspace is unavailable, entry falls back to its top available row. `cpw unassign` returns the active workspace to the default project (or frees it if it's the empty trailing workspace). `cpw forget PROJECT` removes a non-default column and returns its available workspaces to the default. Neither command closes or unpins any workspaces.
@@ -43,7 +43,7 @@ Press **Down** on a project's bottom row or **Up** on its top row to borrow COSM
 
 Both automatic and manual assignments quietly group assigned workspaces in COSMIC's own list, in project order and then top to bottom. The block starts at the first assigned workspace. The unassigned spare stays at the end. COSMIC's workspace numbers and its native next/previous traversal can change; the active workspace and its windows stay together.
 
-`cpw status --grid` shows the project columns side by side, with the active workspace in brackets. `cpw sync-order --dry-run` previews a reorder without making changes. Run `cpw sync-order` to apply it to an existing layout or repair drift after manually dragging workspaces in COSMIC or starting a new login session. Switching projects doesn't trigger a reorder.
+`cpw status` shows the project grid, followed by a legend, the default project, and the spare workspace. `cpw sync-order --dry-run` previews a reorder without making changes. Run `cpw sync-order` to apply it to an existing layout or repair drift after manually dragging workspaces in COSMIC or starting a new login session. Switching projects doesn't trigger a reorder.
 
 ## Banners and animation
 
