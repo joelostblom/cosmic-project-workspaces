@@ -930,7 +930,7 @@ impl State {
                 writeln!(text, "   {}", Self::status_label(w)).unwrap();
             }
         }
-        writeln!(text, "\n[ ] active; * last used; ~ session only").unwrap();
+        writeln!(text, "\n[ ] active; * last used").unwrap();
         writeln!(text, "Default project: {}", self.default_project).unwrap();
         let spare = spare.map_or_else(|| "none".to_owned(), Self::status_label);
         write!(text, "Spare: {spare}").unwrap();
@@ -964,9 +964,6 @@ impl State {
                             .map_or_else(|| "(unavailable)".into(), Self::status_label);
                         if project.last.as_ref() == Some(key) {
                             label.push_str(" *");
-                        }
-                        if matches!(key, Key::Session(_)) {
-                            label.push_str(" ~");
                         }
                         label
                     }))
