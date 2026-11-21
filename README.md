@@ -33,7 +33,7 @@ Repeat on another workspace with a different project name. Assign a third worksp
 
 New projects appear on the right; new rows go at the bottom unless you pass `--top`. `cpw go PROJECT` enters a project by name, including when the active workspace isn't assigned. Unavailable workspaces are skipped; if a project's last-used workspace is unavailable, entry falls back to its top available row. `cpw unassign` removes just the active workspace from the layout. `cpw forget PROJECT` removes a whole column. Neither command closes or unpins any workspaces.
 
-Press **Down** on a project's bottom row to borrow COSMIC's trailing empty workspace. It joins the project without being pinned or reordered before the switch. Repeated Down presses won't add rows while you're on the empty spare. If you leave it unused, it becomes available to other projects again; when COSMIC adds a new spare after you open a window, `cpw` syncs the now-used row into its project block. Growing from the top isn't supported yet.
+Press **Down** on a project's bottom row or **Up** on its top row to borrow COSMIC's trailing empty workspace without pinning it. For **Up**, `cpw` moves the spare above the current row and activates it in one transaction so COSMIC can slide upward. For **Down**, the spare stays at the end for the slide; `cpw` syncs it into the project block when COSMIC supplies a fresh spare. Open a window on the new row before growing that edge again. If you leave the row empty, COSMIC can remove it or the helper can return it to the spare pool.
 
 ### Keep COSMIC order in sync
 

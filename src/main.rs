@@ -81,7 +81,7 @@ enum Command {
     Left,
     /// Switch right to the neighboring project's last-used workspace
     Right,
-    /// Move one workspace up within the active project
+    /// Move up within the active project, borrowing an empty row at the top
     Up,
     /// Move down within the active project, borrowing an empty row at the bottom
     Down,
