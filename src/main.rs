@@ -83,7 +83,7 @@ enum Command {
     Right,
     /// Move one workspace up within the active project
     Up,
-    /// Move one workspace down within the active project
+    /// Move down within the active project, borrowing an empty row at the bottom
     Down,
 }
 

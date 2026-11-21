@@ -191,6 +191,20 @@ impl Layout {
         detached
     }
 
+    pub fn release_extension(&mut self, key: &Key) {
+        if let Some((column, row)) = self.position(key) {
+            let project = &mut self.projects[column];
+            if project.last.as_ref() == Some(key) {
+                // Don't lose the last-used position just because an empty
+                // bottom row went away.
+                project.last = row
+                    .checked_sub(1)
+                    .map(|previous| project.members[previous].clone());
+            }
+            self.unassign(key);
+        }
+    }
+
     pub fn forget(&mut self, name: &str) -> Result<()> {
         let Some(i) = self
             .projects
@@ -276,6 +290,18 @@ mod tests {
 
     fn stable(id: &str) -> Key {
         Key::Stable(id.to_owned())
+    }
+
+    #[test]
+    fn releasing_an_empty_extension_remembers_the_previous_row() {
+        let mut layout = Layout::default();
+        let bottom = stable("bottom");
+        let spare = Key::Session(3);
+        layout.assign(stable("top"), "Work".into(), false).unwrap();
+        layout.assign(bottom.clone(), "Work".into(), false).unwrap();
+        layout.assign(spare.clone(), "Work".into(), false).unwrap();
+        layout.release_extension(&spare);
+        assert_eq!(layout.go("Work", |_| true).unwrap(), &bottom);
     }
 
     #[test]

@@ -17,6 +17,7 @@ use std::{
     io,
     os::unix::net::UnixListener,
     thread,
+    time::{Duration, Instant},
 };
 use unicode_width::UnicodeWidthStr;
 use wayland_client::{
@@ -31,6 +32,10 @@ use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_handle_v1::{self as workspace, ExtWorkspaceHandleV1},
     ext_workspace_manager_v1::{self as manager, ExtWorkspaceManagerV1},
 };
+
+// COSMIC batches its workspace refreshes (150 ms as of 1.11). Give it time
+// to append a new spare before releasing a just-left row as unused.
+const LOAN_GRACE: Duration = Duration::from_millis(300);
 
 pub struct Desktop {
     conn: Connection,
@@ -76,6 +81,7 @@ impl Desktop {
     }
 
     pub fn wait(&mut self, listener: &UnixListener) -> Result<bool> {
+        self.maintain_growth();
         let Some(guard) = self.queue.prepare_read() else {
             self.queue.dispatch_pending(&mut self.state)?;
             self.state.ensure_online()?;
@@ -93,12 +99,13 @@ impl Desktop {
             PollFd::from_borrowed_fd(guard.connection_fd(), interest),
             PollFd::new(listener, PollFlags::IN),
         ];
-        // When the experiment catches termination signals for cleanup, check the
-        // stop flag periodically even if neither connection receives events.
-        let timeout = self.slide.as_ref().map(|_| Timespec {
-            tv_sec: 0,
-            tv_nsec: 100_000_000,
-        });
+        // Wake periodically to release a loan or handle a termination signal,
+        // even if neither connection receives events.
+        let timeout =
+            (self.slide.is_some() || self.state.has_loan_deadline()).then_some(Timespec {
+                tv_sec: 0,
+                tv_nsec: 100_000_000,
+            });
         match poll(&mut fds, timeout.as_ref()) {
             Err(rustix::io::Errno::INTR) => return Ok(false),
             result => {
@@ -130,20 +137,28 @@ impl Desktop {
         // Read everything the compositor has sent before interpreting a shortcut.
         self.queue.roundtrip(&mut self.state)?;
         self.state.ensure_online()?;
+        self.maintain_growth();
         match command {
             Command::Serve { .. } => bail!("the helper is already running"),
             Command::Status { grid } => Ok(self.state.status(grid)),
             Command::SyncOrder { dry_run } => self.sync_order(dry_run),
             Command::Assign { project, top } => {
                 let workspace = self.state.current()?;
-                let (key, serial, old_name) =
-                    (workspace.key(), workspace.serial, workspace.label());
+                let (key, serial, old_name, id) = (
+                    workspace.key(),
+                    workspace.serial,
+                    workspace.label(),
+                    workspace.handle.id(),
+                );
                 let hint = if matches!(key, Key::Session(_)) {
                     "\nSession only unless you pin this workspace in COSMIC."
                 } else {
                     ""
                 };
                 self.state.layout.assign(key, project.clone(), top)?;
+                if let Some(workspace) = self.state.workspaces.get_mut(&id) {
+                    workspace.extension = None;
+                }
                 self.state.observe_active();
                 let warning = self
                     .sync_order(false)
@@ -201,9 +216,63 @@ impl Desktop {
                             Direction::Up | Direction::Down => SlideAxis::Vertical,
                         },
                     ),
+                    None if matches!(direction, Direction::Down) => self.extend_down(&current),
                     None => Ok("No workspace in that direction.".into()),
                 }
             }
+        }
+    }
+
+    fn extend_down(&mut self, current: &Key) -> Result<String> {
+        let project = self
+            .state
+            .layout
+            .project_name(current)
+            .context("the active workspace is not assigned to a project")?
+            .to_owned();
+        ensure!(
+            self.state.cosmic_manager.is_some(),
+            "bottom-edge growth requires COSMIC's dynamic workspaces"
+        );
+        let ordered = self.state.ordered_workspaces()?;
+        let Some(spare) = ordered
+            .last()
+            .filter(|w| !w.active() && w.id.is_none() && !self.state.layout.contains(&w.key()))
+        else {
+            return Ok("No empty trailing workspace is available yet.".into());
+        };
+        let key = spare.key();
+        let id = spare.handle.id();
+        let label = spare.label();
+
+        // The spare is already below the active workspace in COSMIC. Keep it
+        // there for this slide. Attach it in memory first so the project stays
+        // in place even if COSMIC drops its old empty workspace when we leave.
+        self.state
+            .layout
+            .assign(key.clone(), project.clone(), false)?;
+        self.state.observe_active();
+        if let Err(error) = self.activate(key.clone(), SlideAxis::Vertical) {
+            let key = self.state.workspaces.get(&id).map_or(key, Workspace::key);
+            self.state.layout.release_extension(&key);
+            self.state.observe_active();
+            return Err(error);
+        }
+        if let Some(workspace) = self.state.workspaces.get_mut(&id) {
+            workspace.extension = Some(Extension {
+                awaiting_spare: true,
+                inactive_since: None,
+            });
+        }
+        self.state.observe_active();
+        Ok(format!("Opened {label} as a new row in {project}."))
+    }
+
+    fn maintain_growth(&mut self) {
+        if self.state.refresh_extensions(Instant::now())
+            && let Err(error) = self.sync_order(false)
+        {
+            eprintln!("Could not sync the new project row: {error:#}");
         }
     }
 
@@ -225,7 +294,10 @@ impl Desktop {
             .projects
             .iter()
             .flat_map(|project| &project.members)
-            .filter_map(|key| self.state.find(key).map(|w| w.serial))
+            .filter_map(|key| {
+                let workspace = self.state.find(key)?;
+                (!workspace.is_borrowed()).then_some(workspace.serial)
+            })
             .collect();
         let plan = OrderPlan::new(&ids, &managed);
         if plan.moves.is_empty() {
@@ -363,6 +435,12 @@ struct Workspace {
     state: workspace::State,
     can_activate: bool,
     can_move: Option<bool>,
+    extension: Option<Extension>,
+}
+
+struct Extension {
+    awaiting_spare: bool,
+    inactive_since: Option<Instant>,
 }
 
 impl Workspace {
@@ -379,6 +457,12 @@ impl Workspace {
 
     fn label(&self) -> String {
         format!("workspace {}", self.name.as_deref().unwrap_or("(unnamed)"))
+    }
+
+    fn is_borrowed(&self) -> bool {
+        self.extension
+            .as_ref()
+            .is_some_and(|loan| loan.awaiting_spare)
     }
 }
 
@@ -418,6 +502,58 @@ impl State {
             "COSMIC didn't provide a unique linear position for each workspace"
         );
         Ok(workspaces)
+    }
+
+    fn has_loan_deadline(&self) -> bool {
+        self.workspaces.values().any(|w| {
+            w.extension
+                .as_ref()
+                .is_some_and(|row| row.inactive_since.is_some())
+        })
+    }
+
+    fn refresh_extensions(&mut self, now: Instant) -> bool {
+        if self.groups.len() != 1 || !self.workspaces.values().any(|w| w.extension.is_some()) {
+            return false;
+        }
+        let Ok(ordered) = self.ordered_workspaces() else {
+            return false;
+        };
+        let Some(tail) = ordered.last() else {
+            return false;
+        };
+        let (tail_serial, tail_position) = (tail.serial, tail.coordinate);
+        let mut sync = false;
+        for workspace in self.workspaces.values_mut() {
+            let key = workspace.key();
+            let active = workspace.active();
+            let Some(extension) = workspace.extension.as_mut() else {
+                continue;
+            };
+            if !self.layout.contains(&key) {
+                workspace.extension = None;
+            } else if workspace.serial == tail_serial && !active {
+                // COSMIC keeps the last empty workspace even after you leave
+                // it. Drop our assignment so another project can borrow it.
+                let since = extension.inactive_since.get_or_insert(now);
+                if now.duration_since(*since) >= LOAN_GRACE {
+                    self.layout.release_extension(&key);
+                    workspace.extension = None;
+                }
+            } else {
+                extension.inactive_since = None;
+                // COSMIC appended a new spare behind this one, so it no
+                // longer needs to be held out of the native project block.
+                if extension.awaiting_spare
+                    && tail_serial > workspace.serial
+                    && workspace.coordinate < tail_position
+                {
+                    extension.awaiting_spare = false;
+                    sync = true;
+                }
+            }
+        }
+        sync
     }
 
     fn current(&self) -> Result<&Workspace> {
@@ -586,6 +722,7 @@ impl Dispatch<ExtWorkspaceManagerV1, ()> for State {
                         state: workspace::State::empty(),
                         can_activate: false,
                         can_move: None,
+                        extension: None,
                     },
                 );
             }
@@ -647,6 +784,7 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for State {
                 if !id.is_empty() {
                     state.layout.promote(w.key(), Key::Stable(id.clone()));
                     w.id = Some(id);
+                    w.extension = None;
                 }
             }
             workspace::Event::Name { name } => w.name = Some(name),
@@ -666,7 +804,9 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for State {
                         .contains(workspace::WorkspaceCapabilities::Activate);
             }
             workspace::Event::Removed => {
-                if w.id.is_none() {
+                if w.extension.is_some() {
+                    state.layout.release_extension(&w.key());
+                } else if w.id.is_none() {
                     state.layout.unassign(&w.key());
                 }
                 if let Some(cosmic_handle) = w.cosmic_handle.take() {
