@@ -1,3 +1,5 @@
+*This project was created with significant help from GPT-Sol 6.2*
+
 # COSMIC Project Workspaces
 
 `cpw` is a keyboard-driven prototype for [COSMIC issue #137](https://github.com/pop-os/cosmic-epoch/issues/137). It groups your existing COSMIC workspaces into project columns **without modifying COSMIC's source code**.
