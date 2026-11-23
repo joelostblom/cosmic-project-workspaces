@@ -28,11 +28,11 @@ Saved layouts keep their existing columns; `--project` is only used to set up a 
 
 ### Move workspaces between projects
 
-`cpw move-left` and `cpw move-right` move the **whole active workspace**, with its windows, to the bottom of the adjacent project. It stays active. Moving or navigating past an outer edge creates a temporary `Project N` on that side. Temporary columns disappear when they lose their last workspace. Use `cpw rename-project NAME` while on a workspace in that column to give it a permanent name. The configured default name is fixed for the current run; change it with `--default-project`.
+`cpw move-left` and `cpw move-right` move the **whole active workspace**, with its windows, to the bottom of the adjacent project. It stays active. Moving or navigating past an outer edge creates a temporary `Project N` on that side. Numbers increase while you browse successive empty projects on the same workspace. A fresh preview takes the lowest available number, reusing names once their old columns disappear. Temporary columns disappear when they lose their last workspace. Use `cpw rename-project NAME` while on a workspace in that column to give it a permanent name. The configured default name is fixed for the current run; change it with `--default-project`.
 
 Named columns stay visible even if they have no workspaces. `left`, `right`, and `go PROJECT` borrow COSMIC's trailing spare to enter an existing empty column. Plain `left` and `right` also borrow the spare to enter a new temporary column past the edge, without moving your current workspace or its windows. Open a window there to keep the workspace in that project, or leave it empty to let the spare be reclaimed.
 
-COSMIC doesn't supply another spare while you're sitting on an empty trailing workspace. In that case, horizontal navigation can reuse the same workspace if it's a confirmed-empty, unpinned loan. The project banner changes without a desktop slide, and the previous temporary column disappears if it has no other workspaces. If the current workspace has windows, navigation waits for a fresh spare rather than transferring it.
+The first switch to a temporary project slides if it uses a different workspace. Continuing past the same edge from that empty temporary project reuses its workspace: the project banner updates without another slide, and the previous temporary column disappears. Horizontal navigation can also reuse an empty trailing loan when COSMIC hasn't supplied a separate spare. Workspaces with windows are never reused this way.
 
 You can still assign the active workspace by name to create a named column:
 

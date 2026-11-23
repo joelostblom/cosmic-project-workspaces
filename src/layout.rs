@@ -217,6 +217,13 @@ impl Layout {
             .map(|(column, _)| self.projects[column].name.as_str())
     }
 
+    pub fn is_single_row_temporary(&self, key: &Key) -> bool {
+        self.position(key).is_some_and(|(column, _)| {
+            let project = &self.projects[column];
+            project.temporary && project.members.len() == 1
+        })
+    }
+
     fn project_index(&self, name: &str) -> Option<usize> {
         self.projects
             .iter()
@@ -272,7 +279,7 @@ impl Layout {
             Side::Right => (column + 1 < self.projects.len()).then_some(column + 1),
         };
         let Some(index) = adjacent else {
-            let name = self.temporary_name(default_project);
+            let name = self.next_temporary_name(1, default_project);
             self.detach(&key);
             self.insert_temporary(key, side, name.clone());
             return Ok(name);
@@ -298,8 +305,18 @@ impl Layout {
                 name
             }
             SpareProject::Temporary => {
-                // Choose a different name before releasing a recycled spare's old project.
-                let name = self.temporary_name(default_project);
+                // Only continuing on the same empty preview carries its number
+                // forward. A fresh loan can recycle names from earlier previews.
+                let first = if self.is_single_row_temporary(&key) {
+                    self.project_name(&key)
+                        .and_then(|name| name.strip_prefix("Project "))
+                        .and_then(|number| number.parse::<u64>().ok())
+                        .and_then(|number| number.checked_add(1))
+                        .unwrap_or(1)
+                } else {
+                    1
+                };
+                let name = self.next_temporary_name(first, default_project);
                 self.release_extension(&key);
                 self.insert_temporary(key, side, name.clone());
                 name
@@ -308,8 +325,9 @@ impl Layout {
         Ok(name)
     }
 
-    fn temporary_name(&self, default_project: &str) -> String {
-        (1..=self.projects.len() + 2)
+    fn next_temporary_name(&self, first: u64, default_project: &str) -> String {
+        (first..=u64::MAX)
+            .chain(1..first)
             .map(|number| format!("Project {number}"))
             .find(|name| name != default_project && self.project_index(name).is_none())
             .expect("a finite project list cannot use all names")
@@ -626,14 +644,30 @@ mod tests {
             layout.go(&spare, "Work", |_| true).unwrap(),
             Destination::Workspace(bottom.clone())
         );
+        assert!(layout.is_single_row_temporary(&spare));
+        assert!(!layout.is_single_row_temporary(&bottom));
+        for name in ["Project 2", "Project 3", "Project 4"] {
+            assert_eq!(
+                layout
+                    .assign_spare(spare.clone(), SpareProject::Temporary, Side::Right, "Work")
+                    .unwrap(),
+                name
+            );
+            assert_eq!(names(&layout), ["Work", name]);
+            assert_eq!(layout.project_name(&spare), Some(name));
+        }
+        layout.release_extension(&spare);
+        assert_eq!(
+            layout.move_to_neighbor(bottom, Side::Left, "Work").unwrap(),
+            "Project 1"
+        );
+        // Project 1 has a real workspace now, so a fresh preview can only recycle Project 2.
         assert_eq!(
             layout
-                .assign_spare(spare.clone(), SpareProject::Temporary, Side::Right, "Work")
+                .assign_spare(spare, SpareProject::Temporary, Side::Left, "Work")
                 .unwrap(),
             "Project 2"
         );
-        assert_eq!(names(&layout), ["Work", "Project 2"]);
-        assert_eq!(layout.project_name(&spare), Some("Project 2"));
     }
 
     #[test]
@@ -649,8 +683,8 @@ mod tests {
         );
         assert_eq!(names(&layout), ["Project 3", "Work", "Project 1"]);
         assert!(layout.projects[0].temporary);
-        let mut layout = Layout::restore(layout.snapshot()).unwrap();
-        assert!(layout.projects[0].temporary);
+        let restored = Layout::restore(layout.snapshot()).unwrap();
+        assert!(restored.projects[0].temporary);
         layout
             .move_to_neighbor(key.clone(), Side::Right, "Project 2")
             .unwrap();

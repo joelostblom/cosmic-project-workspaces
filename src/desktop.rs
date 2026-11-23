@@ -424,27 +424,50 @@ impl Desktop {
             "active workspace changed; try again"
         );
         let anchor = before.then(|| origin.handle.clone());
-        let ordered = self.state.ordered_workspaces()?;
-        let Some(spare) = ordered.last().filter(|w| {
-            if !self.state.dynamic_empty(w) {
-                return false;
-            }
-            // COSMIC won't add another spare while this one is still empty at
-            // the end. We can leave the empty project without changing desktops.
-            !self.state.layout.contains(&w.key())
-                || (axis == SlideAxis::Horizontal
-                    && w.active()
-                    && w.extension.as_ref().is_some_and(|loan| {
-                        matches!(loan.placement, ExtensionPlacement::BorrowedTail)
-                    })
-                    && self.state.occupancy.is_known_empty(&w.handle.id()))
-        }) else {
-            return Ok("No empty trailing workspace is available yet.".into());
+        let reusable = axis == SlideAxis::Horizontal
+            && origin.extension.as_ref().is_some_and(|loan| {
+                matches!(
+                    loan.placement,
+                    ExtensionPlacement::BorrowedTail | ExtensionPlacement::BorrowedLeft
+                )
+            })
+            && self.state.dynamic_empty(origin)
+            && self.state.occupancy.is_known_empty(&origin.handle.id());
+        let spare = if reusable
+            && matches!(&project, SpareProject::Temporary)
+            && self.state.layout.is_single_row_temporary(current)
+        {
+            // After the first slide into an empty temporary project, show
+            // successive previews in place even if a fresh spare is available.
+            origin
+        } else {
+            let ordered = self.state.ordered_workspaces()?;
+            let Some(spare) = ordered.last().copied().filter(|w| {
+                self.state.dynamic_empty(w)
+                    && (!self.state.layout.contains(&w.key())
+                        || (reusable && w.serial == origin.serial))
+            }) else {
+                return Ok("No empty trailing workspace is available yet.".into());
+            };
+            spare
         };
         let key = spare.key();
         let id = spare.handle.id();
         let serial = spare.serial;
         let already_active = spare.active();
+        let placement = if already_active {
+            // Preserve the loan's placement so it can still be aligned when filled.
+            spare
+                .extension
+                .as_ref()
+                .map_or(ExtensionPlacement::BorrowedTail, |loan| loan.placement)
+        } else {
+            match (axis, before) {
+                (SlideAxis::Vertical, true) => ExtensionPlacement::Top,
+                (SlideAxis::Horizontal, true) => ExtensionPlacement::BorrowedLeft,
+                (_, false) => ExtensionPlacement::BorrowedTail,
+            }
+        };
 
         // Assign before activation so the confirmed switch sees the new project.
         // The spare is already after us for right/down; left/up needs an anchor.
@@ -455,11 +478,6 @@ impl Desktop {
             side,
             &self.state.default_project,
         )?;
-        let placement = match (axis, before && !already_active) {
-            (SlideAxis::Vertical, true) => ExtensionPlacement::Top,
-            (SlideAxis::Horizontal, true) => ExtensionPlacement::BorrowedLeft,
-            (_, false) => ExtensionPlacement::BorrowedTail,
-        };
         self.state.workspaces.get_mut(&id).unwrap().extension = Some(Extension {
             placement,
             inactive_since: None,
