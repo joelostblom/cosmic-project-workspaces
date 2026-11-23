@@ -84,9 +84,9 @@ enum Command {
     Forget { project: String },
     /// Enter a named project, borrowing an empty workspace if needed
     Go { project: String },
-    /// Switch to the project on the left, borrowing an empty workspace if needed
+    /// Switch left, borrowing a spare for an empty or new project
     Left,
-    /// Switch to the project on the right, borrowing an empty workspace if needed
+    /// Switch right, borrowing a spare for an empty or new project
     Right,
     /// Move the entire active workspace to the column on the left
     MoveLeft,

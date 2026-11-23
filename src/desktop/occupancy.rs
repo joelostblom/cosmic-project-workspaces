@@ -19,13 +19,21 @@ use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
 #[derive(Default)]
 pub(super) struct Occupancy {
     info: Option<ZcosmicToplevelInfoV1>,
-    _list: Option<ExtForeignToplevelListV1>,
+    list: Option<ExtForeignToplevelListV1>,
     windows: HashMap<ObjectId, Window>,
 }
 
 struct Window {
     handle: ZcosmicToplevelHandleV1,
     workspaces: HashSet<ObjectId>,
+    snapshot: Snapshot,
+}
+
+#[derive(PartialEq, Eq)]
+enum Snapshot {
+    AwaitingState,
+    AwaitingDone,
+    Ready,
 }
 
 impl Occupancy {
@@ -36,7 +44,7 @@ impl Occupancy {
             .and_then(|_| globals.bind(queue, 1..=1, ()).ok());
         Self {
             info,
-            _list: list,
+            list,
             windows: HashMap::new(),
         }
     }
@@ -45,6 +53,14 @@ impl Occupancy {
         self.windows
             .values()
             .any(|window| window.workspaces.contains(workspace))
+    }
+
+    pub(super) fn is_known_empty(&self, workspace: &ObjectId) -> bool {
+        // A just-announced window doesn't have workspace membership yet.
+        self.list.is_some()
+            && self.windows.values().all(|window| {
+                window.snapshot == Snapshot::Ready && !window.workspaces.contains(workspace)
+            })
     }
 }
 
@@ -83,6 +99,7 @@ impl Dispatch<ExtForeignToplevelListV1, ()> for State {
                 Window {
                     handle,
                     workspaces: HashSet::new(),
+                    snapshot: Snapshot::AwaitingState,
                 },
             );
         }
@@ -98,11 +115,21 @@ impl Dispatch<ExtForeignToplevelHandleV1, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let foreign_window::Event::Closed = event {
-            if let Some(window) = state.occupancy.windows.remove(&window.id()) {
-                window.handle.destroy();
+        match event {
+            foreign_window::Event::Closed => {
+                if let Some(entry) = state.occupancy.windows.remove(&window.id()) {
+                    entry.handle.destroy();
+                }
+                window.destroy();
             }
-            window.destroy();
+            foreign_window::Event::Done => {
+                if let Some(entry) = state.occupancy.windows.get_mut(&window.id())
+                    && entry.snapshot == Snapshot::AwaitingDone
+                {
+                    entry.snapshot = Snapshot::Ready;
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -120,6 +147,9 @@ impl Dispatch<ZcosmicToplevelHandleV1, ObjectId> for State {
             return;
         };
         match event {
+            cosmic_window::Event::State { .. } if window.snapshot == Snapshot::AwaitingState => {
+                window.snapshot = Snapshot::AwaitingDone;
+            }
             cosmic_window::Event::ExtWorkspaceEnter { workspace } => {
                 window.workspaces.insert(workspace.id());
             }

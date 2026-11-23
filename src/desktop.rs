@@ -3,7 +3,7 @@ mod overlay;
 
 use crate::{
     Command,
-    layout::{Destination, Direction, Key, Layout, SavedLayout, Side},
+    layout::{Destination, Direction, Key, Layout, SavedLayout, Side, SpareProject},
     order::OrderPlan,
     project_changes::ProjectChanges,
     slide::{ANIMATION_HOLD, CONFIG_SETTLE, SlideAxis, SlideExperiment},
@@ -322,9 +322,9 @@ impl Desktop {
     fn navigate(&mut self, current: &Key, target: Destination, axis: SlideAxis) -> Result<String> {
         match target {
             Destination::Workspace(key) => self.activate(key, axis, None),
-            Destination::EmptyProject { name, side } => self.borrow_spare(
+            Destination::BorrowSpare { project, side } => self.borrow_spare(
                 current,
-                name,
+                project,
                 SlideAxis::Horizontal,
                 matches!(side, Side::Left),
             ),
@@ -394,13 +394,18 @@ impl Desktop {
             .project_name(current)
             .context("the active workspace is not assigned to a project")?
             .to_owned();
-        self.borrow_spare(current, project, SlideAxis::Vertical, top)
+        self.borrow_spare(
+            current,
+            SpareProject::Existing(project),
+            SlideAxis::Vertical,
+            top,
+        )
     }
 
     fn borrow_spare(
         &mut self,
         current: &Key,
-        project: String,
+        project: SpareProject,
         axis: SlideAxis,
         before: bool,
     ) -> Result<String> {
@@ -420,10 +425,20 @@ impl Desktop {
         );
         let anchor = before.then(|| origin.handle.clone());
         let ordered = self.state.ordered_workspaces()?;
-        let Some(spare) = ordered
-            .last()
-            .filter(|w| self.state.dynamic_empty(w) && !self.state.layout.contains(&w.key()))
-        else {
+        let Some(spare) = ordered.last().filter(|w| {
+            if !self.state.dynamic_empty(w) {
+                return false;
+            }
+            // COSMIC won't add another spare while this one is still empty at
+            // the end. We can leave the empty project without changing desktops.
+            !self.state.layout.contains(&w.key())
+                || (axis == SlideAxis::Horizontal
+                    && w.active()
+                    && w.extension.as_ref().is_some_and(|loan| {
+                        matches!(loan.placement, ExtensionPlacement::BorrowedTail)
+                    })
+                    && self.state.occupancy.is_known_empty(&w.handle.id()))
+        }) else {
             return Ok("No empty trailing workspace is available yet.".into());
         };
         let key = spare.key();
@@ -433,10 +448,14 @@ impl Desktop {
 
         // Assign before activation so the confirmed switch sees the new project.
         // The spare is already after us for right/down; left/up needs an anchor.
-        self.state
-            .layout
-            .assign(key.clone(), project.clone(), before)?;
-        let placement = match (axis, before) {
+        let side = if before { Side::Left } else { Side::Right };
+        let project = self.state.layout.assign_spare(
+            key.clone(),
+            project,
+            side,
+            &self.state.default_project,
+        )?;
+        let placement = match (axis, before && !already_active) {
             (SlideAxis::Vertical, true) => ExtensionPlacement::Top,
             (SlideAxis::Horizontal, true) => ExtensionPlacement::BorrowedLeft,
             (_, false) => ExtensionPlacement::BorrowedTail,
@@ -447,7 +466,7 @@ impl Desktop {
         });
         self.state.observe_active();
         if already_active {
-            // `go PROJECT` can borrow the spare we are already sitting on.
+            // When reusing the active spare, there's no desktop switch to observe.
             self.state.project_changes.announce_entry(serial);
         } else if let Err(error) = self.activate(key.clone(), axis, anchor.as_ref()) {
             let key = self.state.workspaces.get_mut(&id).map_or(key, |workspace| {

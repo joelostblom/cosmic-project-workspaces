@@ -34,7 +34,13 @@ pub enum Side {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Destination {
     Workspace(Key),
-    EmptyProject { name: String, side: Side },
+    BorrowSpare { project: SpareProject, side: Side },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SpareProject {
+    Existing(String),
+    Temporary,
 }
 
 #[derive(Default)]
@@ -66,6 +72,12 @@ impl Project {
         }
     }
 
+    fn add_workspace(&mut self, key: Key, top: bool) {
+        let row = if top { 0 } else { self.members.len() };
+        self.members.insert(row, key.clone());
+        self.last = Some(key);
+    }
+
     fn entry(&self, available: impl Fn(&Key) -> bool) -> Option<&Key> {
         self.last
             .as_ref()
@@ -75,8 +87,8 @@ impl Project {
 
     fn destination(&self, side: Side, available: impl Fn(&Key) -> bool) -> Option<Destination> {
         if self.members.is_empty() {
-            Some(Destination::EmptyProject {
-                name: self.name.clone(),
+            Some(Destination::BorrowSpare {
+                project: SpareProject::Existing(self.name.clone()),
                 side,
             })
         } else {
@@ -220,10 +232,7 @@ impl Layout {
     pub fn assign(&mut self, key: Key, name: String, top: bool) -> Result<()> {
         validate_name(&name)?;
         self.detach(&key);
-        let project = self.get_or_create_project(&name);
-        let row = if top { 0 } else { project.members.len() };
-        project.members.insert(row, key.clone());
-        project.last = Some(key);
+        self.get_or_create_project(&name).add_workspace(key, top);
         self.drop_empty();
         Ok(())
     }
@@ -262,23 +271,59 @@ impl Layout {
             Side::Left => column.checked_sub(1),
             Side::Right => (column + 1 < self.projects.len()).then_some(column + 1),
         };
-        let destination = if let Some(index) = adjacent {
-            self.projects[index].name.clone()
-        } else {
-            let name = (1..=self.projects.len() + 2)
-                .map(|number| format!("Project {number}"))
-                .find(|name| name != default_project && self.project_index(name).is_none())
-                .expect("a finite project list cannot use all names");
-            let index = match side {
-                Side::Left => 0,
-                Side::Right => self.projects.len(),
-            };
-            self.projects
-                .insert(index, Project::empty(name.clone(), true));
-            name
+        let Some(index) = adjacent else {
+            let name = self.temporary_name(default_project);
+            self.detach(&key);
+            self.insert_temporary(key, side, name.clone());
+            return Ok(name);
         };
+        let destination = self.projects[index].name.clone();
         self.assign(key, destination.clone(), false)?;
         Ok(destination)
+    }
+
+    pub fn assign_spare(
+        &mut self,
+        key: Key,
+        project: SpareProject,
+        side: Side,
+        default_project: &str,
+    ) -> Result<String> {
+        let name = match project {
+            SpareProject::Existing(name) => {
+                validate_name(&name)?;
+                self.release_extension(&key);
+                self.get_or_create_project(&name)
+                    .add_workspace(key, side == Side::Left);
+                name
+            }
+            SpareProject::Temporary => {
+                // Choose a different name before releasing a recycled spare's old project.
+                let name = self.temporary_name(default_project);
+                self.release_extension(&key);
+                self.insert_temporary(key, side, name.clone());
+                name
+            }
+        };
+        Ok(name)
+    }
+
+    fn temporary_name(&self, default_project: &str) -> String {
+        (1..=self.projects.len() + 2)
+            .map(|number| format!("Project {number}"))
+            .find(|name| name != default_project && self.project_index(name).is_none())
+            .expect("a finite project list cannot use all names")
+    }
+
+    fn insert_temporary(&mut self, key: Key, side: Side, name: String) {
+        let index = match side {
+            Side::Left => 0,
+            Side::Right => self.projects.len(),
+        };
+        let mut project = Project::empty(name, true);
+        project.add_workspace(key, false);
+        self.projects.insert(index, project);
+        self.drop_empty();
     }
 
     pub fn rename_project(&mut self, from: &str, to: String) -> Result<()> {
@@ -396,6 +441,16 @@ impl Layout {
         };
         let members = &self.projects[column].members;
         Ok(match direction {
+            Direction::Left if column == 0 => Some(Destination::BorrowSpare {
+                project: SpareProject::Temporary,
+                side: Side::Left,
+            }),
+            Direction::Right if column + 1 == self.projects.len() => {
+                Some(Destination::BorrowSpare {
+                    project: SpareProject::Temporary,
+                    side: Side::Right,
+                })
+            }
             Direction::Left => self.projects[..column]
                 .iter()
                 .rev()
@@ -470,15 +525,15 @@ mod tests {
         layout.assign(hobby.clone(), "Hobby".into(), false).unwrap();
         assert_eq!(
             layout.neighbor(&work, Direction::Right, |_| true).unwrap(),
-            Some(Destination::EmptyProject {
-                name: "Personal".into(),
+            Some(Destination::BorrowSpare {
+                project: SpareProject::Existing("Personal".into()),
                 side: Side::Right,
             })
         );
         assert_eq!(
             layout.neighbor(&hobby, Direction::Left, |_| true).unwrap(),
-            Some(Destination::EmptyProject {
-                name: "Personal".into(),
+            Some(Destination::BorrowSpare {
+                project: SpareProject::Existing("Personal".into()),
                 side: Side::Left,
             })
         );
@@ -513,14 +568,72 @@ mod tests {
         ] {
             assert_eq!(
                 layout.go(current, project, |_| true).unwrap(),
-                Destination::EmptyProject {
-                    name: project.into(),
+                Destination::BorrowSpare {
+                    project: SpareProject::Existing(project.into()),
                     side
                 }
             );
         }
         assert!(layout.go(&work, "Work", |_| false).is_err()); // Unavailable isn't empty.
         assert!(layout.go(&work, "Unknown", |_| true).is_err());
+    }
+
+    #[test]
+    fn navigating_past_either_edge_borrows_without_transferring_the_current_workspace() {
+        for (direction, side, expected) in [
+            (Direction::Left, Side::Left, ["Project 1", "Work"]),
+            (Direction::Right, Side::Right, ["Work", "Project 1"]),
+        ] {
+            let mut layout = Layout::initial("Work", vec!["Work".into()]).unwrap();
+            let work = stable("work");
+            let spare = Key::Session(2);
+            layout.assign(work.clone(), "Work".into(), false).unwrap();
+            assert_eq!(
+                layout.neighbor(&work, direction, |_| true).unwrap(),
+                Some(Destination::BorrowSpare {
+                    project: SpareProject::Temporary,
+                    side,
+                })
+            );
+            assert_eq!(names(&layout), ["Work"]); // No column until a spare is assigned.
+            let name = layout
+                .assign_spare(spare.clone(), SpareProject::Temporary, side, "Work")
+                .unwrap();
+            assert_eq!(names(&layout), expected);
+            assert!(layout.projects[layout.project_index(&name).unwrap()].temporary);
+            assert_eq!(layout.project_name(&work), Some("Work"));
+            assert_eq!(layout.project_name(&spare), Some(name.as_str()));
+
+            layout.release_extension(&spare);
+            assert_eq!(names(&layout), ["Work"]);
+        }
+    }
+
+    #[test]
+    fn reusing_an_empty_spare_prunes_its_preview_and_preserves_the_previous_real_row() {
+        let mut layout = Layout::initial("Work", vec!["Work".into()]).unwrap();
+        let (top, bottom, spare) = (stable("top"), stable("bottom"), Key::Session(3));
+        layout.assign(top, "Work".into(), false).unwrap();
+        layout.assign(bottom.clone(), "Work".into(), false).unwrap();
+        layout.assign(spare.clone(), "Work".into(), false).unwrap();
+        assert_eq!(
+            layout
+                .assign_spare(spare.clone(), SpareProject::Temporary, Side::Right, "Work")
+                .unwrap(),
+            "Project 1"
+        );
+        assert_eq!(
+            layout.go(&spare, "Work", |_| true).unwrap(),
+            Destination::Workspace(bottom.clone())
+        );
+        assert_eq!(
+            layout
+                .assign_spare(spare.clone(), SpareProject::Temporary, Side::Right, "Work")
+                .unwrap(),
+            "Project 2"
+        );
+        assert_eq!(names(&layout), ["Work", "Project 2"]);
+        assert_eq!(layout.project_name(&spare), Some("Project 2"));
     }
 
     #[test]
@@ -687,8 +800,9 @@ mod tests {
         let available = |key: &Key| *key != b && *key != d;
         assert_eq!(
             l.neighbor(&a, Direction::Right, available).unwrap(),
-            Some(Destination::Workspace(c))
+            Some(Destination::Workspace(c.clone()))
         );
+        assert_eq!(l.neighbor(&c, Direction::Left, |_| false).unwrap(), None);
     }
 
     #[test]
@@ -717,8 +831,8 @@ mod tests {
         assert_eq!(names(&l), ["Work", "Personal"]);
         assert_eq!(
             l.go(&a, "Work", |_| true).unwrap(),
-            Destination::EmptyProject {
-                name: "Work".into(),
+            Destination::BorrowSpare {
+                project: SpareProject::Existing("Work".into()),
                 side: Side::Left,
             }
         );

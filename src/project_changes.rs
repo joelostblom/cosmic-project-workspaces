@@ -51,8 +51,8 @@ impl ProjectChanges {
     }
 
     pub fn announce_entry(&mut self, workspace: u64) {
-        // Transfers and `go` from the spare can enter a different project
-        // without changing the active workspace. Ordinary edits stay quiet.
+        // Transfers and reusing the active spare can change projects without
+        // changing desktops. Ordinary edits stay quiet.
         if let Some((active, Some(_))) = &self.active
             && *active == workspace
         {

@@ -4,7 +4,7 @@
 
 `cpw` is a keyboard-driven prototype for [COSMIC issue #137](https://github.com/pop-os/cosmic-epoch/issues/137). It groups your existing COSMIC workspaces into project columns **without modifying COSMIC's source code**.
 
-**Left/right** returns to the last workspace you used in the neighboring project, or opens an empty workspace if the project has none. **Up/down** moves within the current project. There is no wraparound.
+**Left/right** returns to the last workspace you used in the neighboring project, or borrows an empty workspace to enter an empty or new project. **Up/down** moves within the current project. There is no wraparound.
 
 ## Try it
 
@@ -28,9 +28,13 @@ Saved layouts keep their existing columns; `--project` is only used to set up a 
 
 ### Move workspaces between projects
 
-`cpw move-left` and `cpw move-right` move the **whole active workspace**, with its windows, to the bottom of the adjacent project. It stays active. Moving past an outer edge creates a temporary `Project N` on that side. Temporary columns disappear when they lose their last workspace. Use `cpw rename-project NAME` while on a workspace in that column to give it a permanent name. The configured default name is fixed for the current run; change it with `--default-project`.
+`cpw move-left` and `cpw move-right` move the **whole active workspace**, with its windows, to the bottom of the adjacent project. It stays active. Moving or navigating past an outer edge creates a temporary `Project N` on that side. Temporary columns disappear when they lose their last workspace. Use `cpw rename-project NAME` while on a workspace in that column to give it a permanent name. The configured default name is fixed for the current run; change it with `--default-project`.
 
-Named columns stay visible even if they have no workspaces. `left`, `right`, and `go PROJECT` borrow COSMIC's trailing spare to enter an existing empty column; they never create a project. Open a window there to keep the workspace in that project, or leave it empty to let the spare be reclaimed. If the spare is already in use, you can't enter another empty column until it is reclaimed or COSMIC supplies a fresh spare. You can still assign the active workspace by name to create a named column or reach a project that isn't adjacent:
+Named columns stay visible even if they have no workspaces. `left`, `right`, and `go PROJECT` borrow COSMIC's trailing spare to enter an existing empty column. Plain `left` and `right` also borrow the spare to enter a new temporary column past the edge, without moving your current workspace or its windows. Open a window there to keep the workspace in that project, or leave it empty to let the spare be reclaimed.
+
+COSMIC doesn't supply another spare while you're sitting on an empty trailing workspace. In that case, horizontal navigation can reuse the same workspace if it's a confirmed-empty, unpinned loan. The project banner changes without a desktop slide, and the previous temporary column disappears if it has no other workspaces. If the current workspace has windows, navigation waits for a fresh spare rather than transferring it.
+
+You can still assign the active workspace by name to create a named column:
 
 ```sh
 ./target/release/cpw assign Personal
