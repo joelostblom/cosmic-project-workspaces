@@ -6,6 +6,7 @@ version = "0.1.0"
 
 [tasks]
 build = "cargo build --locked --release"
+install-local = { cmd = "sh scripts/link-cpw.sh", depends-on = ["build"] }
 serve = "cargo run --locked --release -- serve"
 cpw = "cargo run --locked --release --"
 test = "cargo test --locked"
