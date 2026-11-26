@@ -1,0 +1,14 @@
+[workspace]
+channels = ['conda-forge']
+name = "cosmic-project-workspaces"
+platforms = ['linux-64']
+version = "0.1.0"
+
+[tasks]
+build = "cargo build --locked --release"
+serve = "cargo run --locked --release -- serve"
+cpw = "cargo run --locked --release --"
+test = "cargo test --locked"
+
+[dependencies]
+rust = ">=1.100.0,<1.101"
