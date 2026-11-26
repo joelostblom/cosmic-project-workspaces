@@ -4,7 +4,9 @@
 
 `cpw` is a keyboard-driven prototype for [COSMIC issue #137](https://github.com/pop-os/cosmic-epoch/issues/137). It groups your existing COSMIC workspaces into project columns **without modifying COSMIC's source code**.
 
-**Left/right** returns to the last workspace you used in the neighboring project, or borrows an empty workspace to enter an empty or new project. **Up/down** moves within the current project. There is no wraparound.
+**Left/right** returns to the last workspace you used in the neighboring project, or borrows an empty workspace to enter an empty or new project. **Up/down** moves within the current project and notably adds new workspaces both on the bottom and on the top of each project's column.
+
+[recording-cpw-demo.webm](https://github.com/user-attachments/assets/450ae084-e263-4046-8be8-7ab077cc5b37)
 
 ## Try it
 
