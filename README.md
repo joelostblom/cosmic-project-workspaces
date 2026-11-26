@@ -10,22 +10,22 @@
 
 ## Try it
 
-From this project directory, run `pixi run build` to compile without starting the helper, or `pixi run test` to run the tests. Pixi supplies Rust; no Wayland development packages are needed. Without Pixi, build with `cargo build --release --locked` using Rust 1.89 or newer.
+From this project directory, run `pixi run install-local` to build and link `cpw` into `~/.local/bin`. To build without creating a symlink, run `pixi run build` instead. Pixi supplies Rust; no Wayland development packages are needed. Without Pixi, build with `cargo build --release --locked` using Rust 1.89 or newer.
 
-In a terminal inside COSMIC, start the helper and leave it running:
+In a terminal inside COSMIC, start the helper directly and leave it running:
 
 ```sh
-pixi run serve
+cpw serve
 ```
 
-This builds the release binary if needed and runs it in the foreground. It doesn't install a symlink or restart COSMIC. Press Ctrl+C to stop it. In another terminal in the same checkout, use `pixi run cpw <command>` for the `cpw` commands below. You can also run `./target/release/cpw` directly after building.
+Press Ctrl+C to stop it. Run the other `cpw` commands in a separate terminal. If `cpw` isn't on your `PATH`, use `./target/release/cpw` in place of `cpw` in the examples below, from the project directory. For development, run `pixi run cargo test --locked`.
 
-Workspaces without a project are automatically assigned to **Work**, including new workspaces you start using through COSMIC itself. The empty trailing workspace is kept free for any project to borrow. To use a different default, start the helper with `pixi run serve --default-project "My project"`. This doesn't move any workspaces that already have an assignment.
+Workspaces without a project are automatically assigned to **Work**, including new workspaces you start using through COSMIC itself. The empty trailing workspace is kept free for any project to borrow. To use a different default, start the helper with `cpw serve --default-project "My project"`. This doesn't move any workspaces that already have an assignment.
 
 On a fresh layout, **Work** and **Personal** are ready to use. With a different default, that project comes first, followed by Personal (or Work if Personal is the default). To choose the initial columns and their order, repeat `--project NAME` on the first run. Include the default project in that list:
 
 ```sh
-pixi run serve --project Work --project "Side Projects" --project Personal
+cpw serve --project Work --project "Side Projects" --project Personal
 ```
 
 Saved layouts keep their existing columns; `--project` is only used to set up a new one.
@@ -41,8 +41,8 @@ The first switch to a temporary project slides if it uses a different workspace.
 You can still assign the active workspace by name to create a named column:
 
 ```sh
-pixi run cpw assign Personal
-pixi run cpw status
+cpw assign Personal
+cpw status
 ```
 
 With `assign`, new projects appear on the right; new rows go at the bottom unless you pass `--top`. `cpw go PROJECT` enters a project by name, including from the empty spare. Unavailable workspaces are skipped; if a project's last-used workspace is unavailable, entry falls back to its top available row. `cpw unassign` returns the active workspace to the default project (or frees it if it's the empty trailing workspace). `cpw forget PROJECT` removes a non-default column and returns its available workspaces to the default. Neither command closes or unpins any workspaces.
@@ -69,11 +69,11 @@ The workaround also enables horizontal slides for `move-left` and `move-right`. 
 
 There is no compositor acknowledgement: the helper gives the setting 60 ms to take effect and waits 230 ms after switching before processing another move. COSMIC still chooses the slide's direction from its flat workspace order; use `cpw sync-order` if a project comes in from the wrong side. Other COSMIC controls can see the temporary layout. Avoid changing workspace settings during a switch.
 
-Ctrl+C lets the helper finish restoring the setting. If it is forcibly killed mid-switch, use COSMIC Settings → Desktop → Workspaces to reselect your preferred layout. To disable the workaround, start the helper with `pixi run serve --no-experimental-slide`. Your shortcuts and project banners still work; `cpw` leaves the slide axis alone and transfers don't play a slide.
+Ctrl+C lets the helper finish restoring the setting. If it is forcibly killed mid-switch, use COSMIC Settings → Desktop → Workspaces to reselect your preferred layout. To disable the workaround, start the helper with `cpw serve --no-experimental-slide`. Your shortcuts and project banners still work; `cpw` leaves the slide axis alone and transfers don't play a slide.
 
 ## Shortcuts and pinning
 
-- **Optional shortcuts:** Run `pixi run install-local` once to build and link `cpw` into `~/.local/bin`. It won't overwrite an existing file or a link to another build. If `~/.local/bin` is on COSMIC's `PATH`, use commands like `cpw left` under COSMIC Settings → Keyboard → Keyboard Shortcuts. Otherwise, use the absolute path to this checkout's `target/release/cpw`. Use `left`, `right`, `up`, `down`, `move-left`, or `move-right`, and choose unused shortcuts at first. Keep `pixi run serve` running for the shortcuts to work; `install-local` doesn't start the helper.
+- **Optional shortcuts:** If you ran `pixi run install-local` and `~/.local/bin` is on COSMIC's `PATH`, use commands like `cpw left` under COSMIC Settings → Keyboard → Keyboard Shortcuts. Otherwise, use the absolute path to this checkout's `target/release/cpw`. Use `left`, `right`, `up`, `down`, `move-left`, or `move-right`, and choose unused shortcuts at first. Keep `cpw serve` running for the shortcuts to work; `install-local` doesn't start the helper or overwrite an existing file or link to another build.
 - **Keep workspaces:** Pin a workspace in COSMIC's Workspaces overview before or after assigning it. This keeps it from disappearing when empty and lets COSMIC give the helper a stable ID. The helper saves those assignments and their last-used state in `$XDG_CONFIG_HOME/cosmic-project-workspaces/layout.json` (normally under `~/.config`). Unpinned dynamic workspaces are normally session-only: if COSMIC removes one, the helper drops its assignment. The helper does not pin or unpin anything itself.
 
 This prototype requires a single active display. It borrows COSMIC's dynamic spare rather than creating workspaces directly. It does not move windows, change touchpad gestures, or replace COSMIC's overview. To stop, press Ctrl+C in the terminal running `serve`.
